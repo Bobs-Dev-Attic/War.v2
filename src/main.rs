@@ -135,6 +135,18 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, board_top + 18.0, 10.0),
     ));
 
+    // Version badge, wired to the crate version so it never drifts from Cargo.toml.
+    let board_bottom = -(GRID_H as f32 * CELL) * 0.5;
+    commands.spawn((
+        Text2d::new(concat!("v", env!("CARGO_PKG_VERSION"))),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.45, 0.55, 0.70)),
+        Transform::from_xyz(0.0, board_bottom - 22.0, 10.0),
+    ));
+
     // The player tank.
     spawn_tank(&mut commands, IVec2::new(1, 1), css::LIMEGREEN, true);
 
