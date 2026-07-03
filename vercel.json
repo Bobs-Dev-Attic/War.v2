@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "echo 'Serving pre-built WebAssembly output from dist/ — no build step needed on Vercel.'",
+  "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/(.*)\\.wasm",
+      "headers": [
+        { "key": "Content-Type", "value": "application/wasm" },
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    }
+  ]
+}

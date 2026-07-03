@@ -1,0 +1,32 @@
+[package]
+name = "war_v2"
+version = "0.1.0"
+edition = "2021"
+description = "War.v2 — a small Bevy demo compiled to WebAssembly, hosted on Vercel."
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_winit",
+    "bevy_window",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_asset",
+    "png",
+    "webgl2",
+    "default_font",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Nice panic messages in the browser console.
+console_error_panic_hook = "0.1"
+
+# Small, fast-ish release build tuned for wasm size.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
