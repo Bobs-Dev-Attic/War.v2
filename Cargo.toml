@@ -1,0 +1,24 @@
+[package]
+name = "war_v2"
+version = "0.2.0"
+edition = "2021"
+description = "War.v2 — a small Bevy demo compiled to WebAssembly, hosted on Vercel."
+
+# Use Bevy's default features (a known-good render stack) plus webgl2 for broad
+# browser support. Trimming features tends to drop the *_render half of the 2D
+# pipeline, which silently stops sprites/text from drawing. wasm-opt shrinks the
+# resulting binary at build time (see build.sh).
+[dependencies]
+bevy = { version = "0.19", default-features = true, features = ["webgl2"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Nice panic messages in the browser console.
+console_error_panic_hook = "0.1"
+
+# Small, fast-ish release build tuned for wasm size.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

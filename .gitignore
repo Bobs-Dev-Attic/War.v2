@@ -1,0 +1,5 @@
+# Rust build artifacts (huge; never commit)
+/target
+
+# We DO commit /dist — it's the static output Vercel serves.
+# (see README for the build/deploy model)

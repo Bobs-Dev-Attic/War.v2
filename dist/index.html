@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>War.v2 — Bevy on the web</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0f1729;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      #bevy-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+        outline: none;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #9fb4d4;
+        font-size: 1.1rem;
+        letter-spacing: 0.02em;
+        pointer-events: none;
+        transition: opacity 0.4s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading">Loading War.v2 (Bevy + WebAssembly)…</div>
+    <canvas id="bevy-canvas"></canvas>
+
+    <script type="module">
+      import init from "./war_v2.js";
+
+      // Safety net: never leave the loader up for more than a few seconds.
+      const dropLoader = () => {
+        const el = document.getElementById("loading");
+        if (el) {
+          el.style.opacity = "0";
+          setTimeout(() => el.remove(), 500);
+        }
+      };
+      setTimeout(dropLoader, 6000);
+
+      init()
+        .then(() => {
+          // Bevy has taken over the canvas; fade the loader out.
+          const el = document.getElementById("loading");
+          if (el) {
+            el.style.opacity = "0";
+            setTimeout(() => el.remove(), 500);
+          }
+        })
+        .catch((err) => {
+          const el = document.getElementById("loading");
+          if (el) {
+            el.textContent = "Failed to start War.v2 — see the console for details.";
+            el.style.color = "#ff8080";
+          }
+          console.error(err);
+        });
+    </script>
+  </body>
+</html>
