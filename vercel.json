@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "buildCommand": "bash scripts/build-web.sh",
+  "outputDirectory": "dist",
+  "installCommand": "rustup target add wasm32-unknown-unknown && cargo install wasm-bindgen-cli --locked",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
