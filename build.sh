@@ -26,6 +26,13 @@ wasm-bindgen \
   --out-name "$CRATE" \
   "$TARGET_DIR/$CRATE.wasm"
 
+if command -v wasm-opt >/dev/null 2>&1; then
+  echo "==> wasm-opt (-Os) shrinking $CRATE""_bg.wasm"
+  wasm-opt -Os --strip-debug "dist/${CRATE}_bg.wasm" -o "dist/${CRATE}_bg.wasm"
+else
+  echo "==> wasm-opt not found; skipping size optimization"
+fi
+
 echo "==> copy static shell"
 cp index.html dist/index.html
 

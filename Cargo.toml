@@ -4,20 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "War.v2 — a small Bevy demo compiled to WebAssembly, hosted on Vercel."
 
+# Use Bevy's default features (a known-good render stack) plus webgl2 for broad
+# browser support. Trimming features tends to drop the *_render half of the 2D
+# pipeline, which silently stops sprites/text from drawing. wasm-opt shrinks the
+# resulting binary at build time (see build.sh).
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = [
-    "bevy_winit",
-    "bevy_window",
-    "bevy_render",
-    "bevy_core_pipeline",
-    "bevy_sprite",
-    "bevy_text",
-    "bevy_ui",
-    "bevy_asset",
-    "png",
-    "webgl2",
-    "default_font",
-] }
+bevy = { version = "0.19", default-features = true, features = ["webgl2"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Nice panic messages in the browser console.
