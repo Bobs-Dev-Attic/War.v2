@@ -117,22 +117,22 @@ fn setup(mut commands: Commands) {
     // Titles / instructions in world space above the board.
     let board_top = (GRID_H as f32 * CELL) * 0.5;
     commands.spawn((
-        Text2d::new("War.v2 — tank skirmish"),
+        Text2d::new("War.v2  -  tank skirmish"),
         TextFont {
-            font_size: FontSize::Px(30.0),
+            font_size: FontSize::Px(28.0),
             ..default()
         },
         TextColor(Color::WHITE),
-        Transform::from_xyz(0.0, board_top + 54.0, 10.0),
+        Transform::from_xyz(0.0, board_top + 44.0, 10.0),
     ));
     commands.spawn((
-        Text2d::new("arrow keys / WASD to move  —  no two vehicles share a cell"),
+        Text2d::new("arrow keys / WASD to move   -   no two vehicles share a cell"),
         TextFont {
-            font_size: FontSize::Px(18.0),
+            font_size: FontSize::Px(17.0),
             ..default()
         },
         TextColor(Color::srgb(0.62, 0.72, 0.88)),
-        Transform::from_xyz(0.0, board_top + 24.0, 10.0),
+        Transform::from_xyz(0.0, board_top + 18.0, 10.0),
     ));
 
     // The player tank.
