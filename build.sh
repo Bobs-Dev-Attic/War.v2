@@ -28,7 +28,9 @@ wasm-bindgen \
 
 if command -v wasm-opt >/dev/null 2>&1; then
   echo "==> wasm-opt (-Os) shrinking $CRATE""_bg.wasm"
-  wasm-opt -Os --strip-debug "dist/${CRATE}_bg.wasm" -o "dist/${CRATE}_bg.wasm"
+  # -all enables the post-MVP wasm features (bulk-memory, sign-ext, …) that
+  # rustc emits; without them wasm-opt rejects the module during validation.
+  wasm-opt -Os -all --strip-debug "dist/${CRATE}_bg.wasm" -o "dist/${CRATE}_bg.wasm"
 else
   echo "==> wasm-opt not found; skipping size optimization"
 fi
