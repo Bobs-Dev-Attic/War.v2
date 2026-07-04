@@ -1,61 +1,70 @@
-//! War.v2 — an isometric 3D WWI real-time strategy sim, written in Bevy and
-//! compiled to WebAssembly.
+//! War.v2 — an isometric 3D WWI real-time strategy sim (Bevy → WebAssembly).
 //!
-//! This is the v0.3.0 foundation: an orthographic isometric camera over a
-//! low-poly battlefield, with two armies of low-poly tanks — the British
-//! (khaki) and the Central Powers / Ottoman-German (field-grey) — advancing on
-//! no-man's-land. Units separate so they never overlap, giving the massed
-//! formations a jostling, chaotic feel ahead of real rigid-body physics
-//! (planned for v0.4.0).
+//! v0.4.0: trench warfare. Each side digs in behind a sandbagged trench line,
+//! garrisoned by a roster of low-poly unit types — infantry, snipers, machine
+//! gunners, artillery, runners and scouts. This is the deployed battlefield;
+//! interactive setup (v0.5.0) and real-time commands (v0.6.0) build on it.
 //!
-//! Controls: WASD / arrow keys pan the camera across the battlefield.
+//! Controls: WASD / arrow keys pan the camera across the front.
 
-use bevy::color::palettes::css;
+use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 use bevy::camera::ScalingMode;
+use std::f32::consts::FRAC_PI_2;
 
 // ---- Battlefield geometry -------------------------------------------------
 
-const FIELD_X: f32 = 34.0; // half-width  (east/west)
-const FIELD_Z: f32 = 46.0; // half-depth  (north/south)
-const UNIT_RADIUS: f32 = 0.55; // soldier separation radius (no overlap)
-const ROWS: i32 = 6;
-const COLS: i32 = 12;
-const FILE_SPACING: f32 = 2.2; // gap between soldiers left/right
-const RANK_SPACING: f32 = 2.2; // gap between ranks front/back
+const FIELD_X: f32 = 40.0;
+const FIELD_Z: f32 = 46.0;
+const TRENCH_Z: f32 = 12.0; // each side's trench sits this far from centre
+const LINE_HALF: f32 = 26.0; // trench runs from −LINE_HALF..+LINE_HALF in X
 
-/// The two belligerents. The player will command one of these in a later
-/// version; for now both advance under their own steam.
+/// The two belligerents.
 #[derive(Clone, Copy, PartialEq)]
 enum Faction {
-    /// British Empire — advancing from the south (−Z) toward the line.
-    British,
-    /// Central Powers (Ottoman / German) — advancing from the north (+Z).
-    Central,
+    British, // south (−Z), advancing/facing +Z
+    Central, // Ottoman/German, north (+Z), facing −Z
 }
 
 impl Faction {
-    fn color(self) -> Srgba {
+    /// Unit direction from this faction's trench toward the enemy.
+    fn front(self) -> f32 {
         match self {
-            Faction::British => Srgba::new(0.62, 0.56, 0.36, 1.0), // khaki
-            Faction::Central => Srgba::new(0.36, 0.40, 0.34, 1.0), // field-grey
+            Faction::British => 1.0,
+            Faction::Central => -1.0,
         }
     }
-    /// The direction this faction advances (world +Z or −Z).
-    fn advance(self) -> Vec3 {
+    fn uniform(self) -> Color {
         match self {
-            Faction::British => Vec3::Z,
-            Faction::Central => Vec3::NEG_Z,
+            Faction::British => Color::srgb(0.62, 0.56, 0.36), // khaki
+            Faction::Central => Color::srgb(0.36, 0.40, 0.34), // field-grey
+        }
+    }
+    fn helmet(self) -> Color {
+        match self {
+            Faction::British => Color::srgb(0.30, 0.28, 0.17),
+            Faction::Central => Color::srgb(0.22, 0.25, 0.20),
         }
     }
 }
 
-/// A soldier on the field. `speed` is their forward march rate; separation from
-/// neighbours is applied on top so no two soldiers occupy the same space.
+/// The roster of unit types the player will command.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum UnitType {
+    Infantry,
+    Sniper,
+    MachineGunner,
+    Artillery,
+    Runner,
+    Scout,
+}
+
+/// A deployed unit.
 #[derive(Component)]
+#[allow(dead_code)]
 struct Unit {
     faction: Faction,
-    speed: f32,
+    kind: UnitType,
 }
 
 /// Camera focus point on the ground; the iso camera is a fixed offset from it.
@@ -72,16 +81,57 @@ impl Rng {
         x ^= x >> 17;
         x ^= x << 5;
         self.0 = x;
-        (x >> 8) as f32 / (1u32 << 24) as f32 // 0..1
+        (x >> 8) as f32 / (1u32 << 24) as f32
     }
     fn range(&mut self, lo: f32, hi: f32) -> f32 {
         lo + (hi - lo) * self.f32()
     }
 }
 
-// Isometric camera: a fixed offset direction from the focus, orthographic.
 const ISO_DIR: Vec3 = Vec3::new(1.0, 1.15, 1.0);
 const CAM_DIST: f32 = 90.0;
+
+// ---- Shared art (meshes + materials built once) ---------------------------
+
+/// Shared low-poly meshes, built once and instanced across every unit.
+struct Meshes {
+    legs: Handle<Mesh>,
+    legs_kneel: Handle<Mesh>,
+    torso: Handle<Mesh>,
+    head: Handle<Mesh>,
+    helmet: Handle<Mesh>,
+    cap: Handle<Mesh>,
+    rifle: Handle<Mesh>,
+    long_rifle: Handle<Mesh>,
+    satchel: Handle<Mesh>,
+    binocs: Handle<Mesh>,
+    mg_base: Handle<Mesh>,
+    mg_barrel: Handle<Mesh>,
+    mg_leg: Handle<Mesh>,
+    wheel: Handle<Mesh>,
+    gun_axle: Handle<Mesh>,
+    gun_barrel: Handle<Mesh>,
+    gun_shield: Handle<Mesh>,
+    gun_trail: Handle<Mesh>,
+    sandbag: Handle<Mesh>,
+    duckboard: Handle<Mesh>,
+}
+
+/// Materials that are the same for both sides.
+struct SharedMats {
+    skin: Handle<StandardMaterial>,
+    metal: Handle<StandardMaterial>,
+    wood: Handle<StandardMaterial>,
+    sandbag: Handle<StandardMaterial>,
+    duckboard: Handle<StandardMaterial>,
+}
+
+/// Per-faction materials (uniform, helmet, cap).
+struct FactionMats {
+    uniform: Handle<StandardMaterial>,
+    helmet: Handle<StandardMaterial>,
+    cap: Handle<StandardMaterial>,
+}
 
 fn main() {
     #[cfg(target_arch = "wasm32")]
@@ -92,7 +142,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "War.v2 — WWI (Bevy + WebAssembly)".into(),
+                        title: "War.v2 — WWI trench warfare (Bevy + WebAssembly)".into(),
                         canvas: Some("#bevy-canvas".into()),
                         fit_canvas_to_parent: true,
                         prevent_default_event_handling: false,
@@ -102,11 +152,11 @@ fn main() {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
-        .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72))) // hazy sky
+        .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72)))
         .insert_resource(CameraFocus(Vec3::ZERO))
         .insert_resource(Rng(0x1234_5678))
         .add_systems(Startup, (setup_world, setup_ui))
-        .add_systems(Update, (advance_units, pan_camera).chain())
+        .add_systems(Update, pan_camera)
         .run();
 }
 
@@ -118,24 +168,22 @@ fn setup_world(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut rng: ResMut<Rng>,
 ) {
-    // Isometric orthographic camera, with a camera-attached ambient light.
+    // Camera (iso ortho) + camera-attached ambient light.
     commands.spawn((
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 34.0,
+                viewport_height: 40.0,
             },
             ..OrthographicProjection::default_3d()
         }),
         Transform::from_translation(ISO_DIR.normalize() * CAM_DIST).looking_at(Vec3::ZERO, Vec3::Y),
         AmbientLight {
             color: Color::srgb(0.85, 0.86, 0.90),
-            brightness: 320.0,
+            brightness: 300.0,
             ..default()
         },
     ));
-
-    // Sun: a directional light with shadows for the low-poly look.
     commands.spawn((
         DirectionalLight {
             illuminance: 9000.0,
@@ -145,164 +193,408 @@ fn setup_world(
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Ground: a big matte mud slab.
+    // Ground + no-man's-land.
     let ground = meshes.add(Cuboid::new(FIELD_X * 2.0 + 8.0, 1.0, FIELD_Z * 2.0 + 8.0));
-    let ground_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.28, 0.26, 0.19),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
+    let ground_mat = materials.add(matte(Color::srgb(0.28, 0.26, 0.19)));
     commands.spawn((
         Mesh3d(ground),
         MeshMaterial3d(ground_mat),
         Transform::from_xyz(0.0, -0.5, 0.0),
     ));
-
-    // No-man's-land: a darker churned strip through the middle.
-    let strip = meshes.add(Cuboid::new(FIELD_X * 2.0, 0.06, 10.0));
-    let strip_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.17, 0.15, 0.12),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
+    let strip = meshes.add(Cuboid::new(FIELD_X * 2.0, 0.06, TRENCH_Z * 2.0 - 3.0));
+    let strip_mat = materials.add(matte(Color::srgb(0.17, 0.15, 0.12)));
     commands.spawn((
         Mesh3d(strip),
         MeshMaterial3d(strip_mat),
         Transform::from_xyz(0.0, 0.03, 0.0),
     ));
 
-    // Scatter low-poly craters / rubble for texture.
-    let rubble_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.20, 0.18, 0.14),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    for _ in 0..60 {
-        let s = rng.range(0.6, 2.2);
+    // Scatter shell craters across no-man's-land.
+    let crater_mat = materials.add(matte(Color::srgb(0.20, 0.18, 0.14)));
+    for _ in 0..70 {
+        let s = rng.range(0.6, 2.4);
         let x = rng.range(-FIELD_X, FIELD_X);
-        let z = rng.range(-FIELD_Z, FIELD_Z);
-        let mesh = meshes.add(Cuboid::new(s, rng.range(0.15, 0.5), s));
+        let z = rng.range(-TRENCH_Z + 1.0, TRENCH_Z - 1.0);
+        let m = meshes.add(Cuboid::new(s, rng.range(0.12, 0.4), s));
         commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(rubble_mat.clone()),
+            Mesh3d(m),
+            MeshMaterial3d(crater_mat.clone()),
             Transform::from_xyz(x, 0.05, z)
                 .with_rotation(Quat::from_rotation_y(rng.range(0.0, 6.28))),
         ));
     }
 
-    // Deploy the two armies facing off across no-man's-land, close enough that
-    // the clash is framed from the opening shot.
-    const DEPLOY_Z: f32 = 20.0;
-    spawn_army(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut rng,
-        Faction::British,
-        -DEPLOY_Z,
-    );
-    spawn_army(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut rng,
-        Faction::Central,
-        DEPLOY_Z,
-    );
+    // Build shared art.
+    let art = build_meshes(&mut meshes);
+    let shared = SharedMats {
+        skin: materials.add(matte(Color::srgb(0.72, 0.56, 0.44))),
+        metal: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.13, 0.13, 0.13),
+            perceptual_roughness: 0.55,
+            ..default()
+        }),
+        wood: materials.add(matte(Color::srgb(0.30, 0.20, 0.11))),
+        sandbag: materials.add(matte(Color::srgb(0.46, 0.42, 0.28))),
+        duckboard: materials.add(matte(Color::srgb(0.13, 0.11, 0.08))),
+    };
+
+    for faction in [Faction::British, Faction::Central] {
+        let fmats = FactionMats {
+            uniform: materials.add(matte(faction.uniform())),
+            helmet: materials.add(matte(faction.helmet())),
+            cap: materials.add(matte(Color::srgb(0.34, 0.31, 0.20))),
+        };
+        spawn_trench(&mut commands, &art, &shared, &mut rng, faction);
+        garrison(&mut commands, &art, &shared, &fmats, &mut rng, faction);
+    }
 }
 
-/// Spawn one faction's infantry formation at `base_z`, facing the centre line.
-///
-/// Each soldier is a low-poly figure — legs, uniformed torso, helmeted head and
-/// a shouldered rifle — built from a handful of shared cuboid meshes.
-fn spawn_army(
+fn matte(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 1.0,
+        ..default()
+    }
+}
+
+fn build_meshes(m: &mut Assets<Mesh>) -> Meshes {
+    Meshes {
+        legs: m.add(Cuboid::new(0.44, 0.62, 0.26)),
+        legs_kneel: m.add(Cuboid::new(0.46, 0.32, 0.30)),
+        torso: m.add(Cuboid::new(0.50, 0.68, 0.30)),
+        head: m.add(Cuboid::new(0.26, 0.26, 0.26)),
+        helmet: m.add(Cuboid::new(0.34, 0.16, 0.34)),
+        cap: m.add(Cuboid::new(0.30, 0.13, 0.32)),
+        rifle: m.add(Cuboid::new(0.07, 0.07, 0.95)),
+        long_rifle: m.add(Cuboid::new(0.06, 0.06, 1.35)),
+        satchel: m.add(Cuboid::new(0.30, 0.32, 0.15)),
+        binocs: m.add(Cuboid::new(0.24, 0.11, 0.11)),
+        mg_base: m.add(Cuboid::new(0.34, 0.20, 0.34)),
+        mg_barrel: m.add(Cuboid::new(0.12, 0.12, 1.15)),
+        mg_leg: m.add(Cuboid::new(0.06, 0.06, 0.75)),
+        wheel: m.add(Cylinder::new(0.58, 0.16)),
+        gun_axle: m.add(Cuboid::new(1.7, 0.22, 0.32)),
+        gun_barrel: m.add(Cuboid::new(0.20, 0.20, 2.3)),
+        gun_shield: m.add(Cuboid::new(1.3, 0.95, 0.12)),
+        gun_trail: m.add(Cuboid::new(0.22, 0.16, 1.5)),
+        sandbag: m.add(Cuboid::new(0.82, 0.30, 0.56)),
+        duckboard: m.add(Cuboid::new(LINE_HALF * 2.0 + 2.0, 0.06, 2.0)),
+    }
+}
+
+// ---- Trenches -------------------------------------------------------------
+
+/// A sandbagged trench line for one faction, with a duckboard channel, a
+/// crenellated front parapet and a lower rear parados.
+fn spawn_trench(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    art: &Meshes,
+    shared: &SharedMats,
     rng: &mut Rng,
     faction: Faction,
-    base_z: f32,
 ) {
-    // Shared low-poly soldier meshes (built once, instanced per soldier).
-    let legs = meshes.add(Cuboid::new(0.44, 0.62, 0.26));
-    let torso = meshes.add(Cuboid::new(0.50, 0.68, 0.30));
-    let head = meshes.add(Cuboid::new(0.26, 0.26, 0.26));
-    let helmet = meshes.add(Cuboid::new(0.34, 0.16, 0.34));
-    let rifle = meshes.add(Cuboid::new(0.07, 0.07, 0.95));
+    let front = faction.front();
+    let z_line = -front * TRENCH_Z; // trench sits on the friendly side of centre
 
-    let uniform_mat = materials.add(StandardMaterial {
-        base_color: faction.color().into(),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    // Helmet: Brodie (British) vs Stahlhelm (Central) — both darker than the coat.
-    let helmet_mat = materials.add(StandardMaterial {
-        base_color: match faction {
-            Faction::British => Color::srgb(0.30, 0.28, 0.17),
-            Faction::Central => Color::srgb(0.22, 0.25, 0.20),
-        },
-        perceptual_roughness: 0.8,
-        ..default()
-    });
-    let skin_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.72, 0.56, 0.44),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    let rifle_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.16, 0.11, 0.07), // wood/steel
-        perceptual_roughness: 0.6,
-        ..default()
-    });
+    // Duckboard / mud channel.
+    commands.spawn((
+        Mesh3d(art.duckboard.clone()),
+        MeshMaterial3d(shared.duckboard.clone()),
+        Transform::from_xyz(0.0, 0.05, z_line),
+    ));
 
-    let advance = faction.advance();
-    let facing = Quat::from_rotation_arc(Vec3::Z, advance);
+    // Sandbag rows. Front parapet (enemy side): taller & crenellated. Rear
+    // parados: lower.
+    let mut x = -LINE_HALF;
+    let mut i = 0;
+    while x <= LINE_HALF {
+        let jx = x + rng.range(-0.06, 0.06);
+        // Front parapet.
+        let front_z = z_line + front * 1.35;
+        let tall = i % 3 != 0; // crenellations: gaps every third bag
+        commands.spawn((
+            Mesh3d(art.sandbag.clone()),
+            MeshMaterial3d(shared.sandbag.clone()),
+            Transform::from_xyz(jx, 0.15, front_z)
+                .with_rotation(Quat::from_rotation_y(rng.range(-0.08, 0.08))),
+        ));
+        if tall {
+            commands.spawn((
+                Mesh3d(art.sandbag.clone()),
+                MeshMaterial3d(shared.sandbag.clone()),
+                Transform::from_xyz(jx, 0.44, front_z)
+                    .with_rotation(Quat::from_rotation_y(rng.range(-0.08, 0.08))),
+            ));
+        }
+        // Rear parados (single, lower row).
+        let back_z = z_line - front * 1.35;
+        commands.spawn((
+            Mesh3d(art.sandbag.clone()),
+            MeshMaterial3d(shared.sandbag.clone()),
+            Transform::from_xyz(jx, 0.13, back_z)
+                .with_rotation(Quat::from_rotation_y(rng.range(-0.1, 0.1))),
+        ));
+        x += 0.9;
+        i += 1;
+    }
+}
 
-    for row in 0..ROWS {
-        for col in 0..COLS {
-            let x = (col as f32 - (COLS as f32 - 1.0) * 0.5) * FILE_SPACING + rng.range(-0.5, 0.5);
-            let z = base_z - advance.z * (row as f32 * RANK_SPACING) + rng.range(-0.5, 0.5);
+// ---- Garrison -------------------------------------------------------------
 
-            commands
-                .spawn((
-                    Transform::from_xyz(x, 0.0, z).with_rotation(facing),
-                    Visibility::default(),
-                    Unit {
-                        faction,
-                        speed: rng.range(1.6, 2.6),
-                    },
-                ))
-                .with_children(|s| {
-                    s.spawn((
-                        Mesh3d(legs.clone()),
-                        MeshMaterial3d(uniform_mat.clone()),
-                        Transform::from_xyz(0.0, 0.31, 0.0),
-                    ));
-                    s.spawn((
-                        Mesh3d(torso.clone()),
-                        MeshMaterial3d(uniform_mat.clone()),
-                        Transform::from_xyz(0.0, 0.96, 0.0),
-                    ));
-                    s.spawn((
-                        Mesh3d(head.clone()),
-                        MeshMaterial3d(skin_mat.clone()),
-                        Transform::from_xyz(0.0, 1.40, 0.0),
-                    ));
-                    s.spawn((
-                        Mesh3d(helmet.clone()),
-                        MeshMaterial3d(helmet_mat.clone()),
-                        Transform::from_xyz(0.0, 1.56, 0.0),
-                    ));
-                    // Rifle held across the body, angled forward.
-                    s.spawn((
-                        Mesh3d(rifle.clone()),
-                        MeshMaterial3d(rifle_mat.clone()),
-                        Transform::from_xyz(0.17, 0.95, 0.28)
-                            .with_rotation(Quat::from_rotation_x(-0.35)),
-                    ));
-                });
+/// Deploy one faction's mixed garrison in and around its trench.
+fn garrison(
+    commands: &mut Commands,
+    art: &Meshes,
+    shared: &SharedMats,
+    fmats: &FactionMats,
+    rng: &mut Rng,
+    faction: Faction,
+) {
+    let front = faction.front();
+    let z_line = -front * TRENCH_Z;
+    let facing = Quat::from_rotation_arc(Vec3::Z, Vec3::new(0.0, 0.0, front));
+
+    let jitter = |rng: &mut Rng| Vec3::new(rng.range(-0.25, 0.25), 0.0, rng.range(-0.25, 0.25));
+
+    // Infantry manning the fire trench.
+    let mut x = -LINE_HALF + 1.0;
+    while x <= LINE_HALF - 1.0 {
+        // Machine-gun nests punctuate the line; snipers hold the flanks.
+        let kind = if (x + LINE_HALF).rem_euclid(9.0) < 0.9 {
+            UnitType::MachineGunner
+        } else if x.abs() > LINE_HALF - 3.0 {
+            UnitType::Sniper
+        } else {
+            UnitType::Infantry
+        };
+        let pos = Vec3::new(x, 0.0, z_line) + jitter(rng);
+        spawn_unit(commands, art, shared, fmats, faction, kind, pos, facing);
+        x += 2.8;
+    }
+
+    // Scouts pushed forward toward no-man's-land.
+    for sx in [-8.0_f32, 8.0] {
+        let pos = Vec3::new(sx, 0.0, z_line + front * 2.6) + jitter(rng);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Scout, pos, facing);
+    }
+    // Runners between the trench and the guns.
+    for rx in [-4.0_f32, 4.0] {
+        let pos = Vec3::new(rx, 0.0, z_line - front * 3.5) + jitter(rng);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Runner, pos, facing);
+    }
+    // Artillery battery dug in behind the line.
+    for gx in [-12.0_f32, 0.0, 12.0] {
+        let pos = Vec3::new(gx, 0.0, z_line - front * 7.0);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Artillery, pos, facing);
+    }
+}
+
+/// Spawn one unit of `kind` at `pos` facing `facing`, assembling its low-poly
+/// model from shared meshes.
+fn spawn_unit(
+    commands: &mut Commands,
+    art: &Meshes,
+    shared: &SharedMats,
+    fmats: &FactionMats,
+    faction: Faction,
+    kind: UnitType,
+    pos: Vec3,
+    facing: Quat,
+) {
+    let mut e = commands.spawn((
+        Transform::from_translation(pos).with_rotation(facing),
+        Visibility::default(),
+        Unit { faction, kind },
+    ));
+
+    match kind {
+        UnitType::Infantry => add_soldier(&mut e, art, shared, fmats, Pose::Stand, Head::Helmet, Weapon::Rifle),
+        UnitType::Sniper => {
+            add_soldier(&mut e, art, shared, fmats, Pose::Kneel, Head::Helmet, Weapon::LongRifle)
+        }
+        UnitType::Runner => {
+            add_soldier(&mut e, art, shared, fmats, Pose::Stand, Head::Cap, Weapon::None);
+            add_satchel(&mut e, art, shared);
+        }
+        UnitType::Scout => {
+            add_soldier(&mut e, art, shared, fmats, Pose::Stand, Head::Cap, Weapon::Rifle);
+            add_binoculars(&mut e, art, shared);
+        }
+        UnitType::MachineGunner => {
+            add_soldier(&mut e, art, shared, fmats, Pose::Kneel, Head::Helmet, Weapon::None);
+            add_machine_gun(&mut e, art, shared);
+        }
+        UnitType::Artillery => {
+            add_field_gun(&mut e, art, shared);
+            // A crewman kneeling at the breech.
+            add_soldier(&mut e, art, shared, fmats, Pose::Kneel, Head::Helmet, Weapon::None);
         }
     }
+}
+
+enum Pose {
+    Stand,
+    Kneel,
+}
+enum Head {
+    Helmet,
+    Cap,
+}
+enum Weapon {
+    Rifle,
+    LongRifle,
+    None,
+}
+
+fn add_soldier(
+    e: &mut EntityCommands,
+    art: &Meshes,
+    shared: &SharedMats,
+    fmats: &FactionMats,
+    pose: Pose,
+    head: Head,
+    weapon: Weapon,
+) {
+    let kneel = matches!(pose, Pose::Kneel);
+    let (legs_mesh, leg_y, torso_y, head_y, hat_y, wpn_y) = if kneel {
+        (art.legs_kneel.clone(), 0.16, 0.62, 1.02, 1.18, 0.62)
+    } else {
+        (art.legs.clone(), 0.31, 0.96, 1.40, 1.56, 0.95)
+    };
+
+    e.with_children(|c| {
+        c.spawn((
+            Mesh3d(legs_mesh),
+            MeshMaterial3d(fmats.uniform.clone()),
+            Transform::from_xyz(0.0, leg_y, 0.0),
+        ));
+        c.spawn((
+            Mesh3d(art.torso.clone()),
+            MeshMaterial3d(fmats.uniform.clone()),
+            Transform::from_xyz(0.0, torso_y, 0.0),
+        ));
+        c.spawn((
+            Mesh3d(art.head.clone()),
+            MeshMaterial3d(shared.skin.clone()),
+            Transform::from_xyz(0.0, head_y, 0.0),
+        ));
+        match head {
+            Head::Helmet => {
+                c.spawn((
+                    Mesh3d(art.helmet.clone()),
+                    MeshMaterial3d(fmats.helmet.clone()),
+                    Transform::from_xyz(0.0, hat_y, 0.0),
+                ));
+            }
+            Head::Cap => {
+                c.spawn((
+                    Mesh3d(art.cap.clone()),
+                    MeshMaterial3d(fmats.cap.clone()),
+                    Transform::from_xyz(0.0, hat_y - 0.02, 0.0),
+                ));
+            }
+        }
+        match weapon {
+            Weapon::Rifle => {
+                c.spawn((
+                    Mesh3d(art.rifle.clone()),
+                    MeshMaterial3d(shared.wood.clone()),
+                    Transform::from_xyz(0.17, wpn_y, 0.30)
+                        .with_rotation(Quat::from_rotation_x(-0.35)),
+                ));
+            }
+            Weapon::LongRifle => {
+                c.spawn((
+                    Mesh3d(art.long_rifle.clone()),
+                    MeshMaterial3d(shared.wood.clone()),
+                    Transform::from_xyz(0.16, wpn_y + 0.05, 0.45)
+                        .with_rotation(Quat::from_rotation_x(-0.15)),
+                ));
+            }
+            Weapon::None => {}
+        }
+    });
+}
+
+fn add_satchel(e: &mut EntityCommands, art: &Meshes, shared: &SharedMats) {
+    e.with_children(|c| {
+        c.spawn((
+            Mesh3d(art.satchel.clone()),
+            MeshMaterial3d(shared.wood.clone()),
+            Transform::from_xyz(0.0, 0.9, -0.24),
+        ));
+    });
+}
+
+fn add_binoculars(e: &mut EntityCommands, art: &Meshes, shared: &SharedMats) {
+    e.with_children(|c| {
+        c.spawn((
+            Mesh3d(art.binocs.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 1.40, 0.20),
+        ));
+    });
+}
+
+fn add_machine_gun(e: &mut EntityCommands, art: &Meshes, shared: &SharedMats) {
+    e.with_children(|c| {
+        c.spawn((
+            Mesh3d(art.mg_base.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 0.26, 0.55),
+        ));
+        c.spawn((
+            Mesh3d(art.mg_barrel.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 0.44, 1.1),
+        ));
+        // Splayed tripod legs.
+        for (dx, rot) in [(0.22_f32, 0.4_f32), (-0.22, -0.4)] {
+            c.spawn((
+                Mesh3d(art.mg_leg.clone()),
+                MeshMaterial3d(shared.metal.clone()),
+                Transform::from_xyz(dx, 0.2, 0.35)
+                    .with_rotation(Quat::from_rotation_z(rot) * Quat::from_rotation_x(0.5)),
+            ));
+        }
+    });
+}
+
+fn add_field_gun(e: &mut EntityCommands, art: &Meshes, shared: &SharedMats) {
+    e.with_children(|c| {
+        // Two wheels on a horizontal axle (cylinder rotated to lie along X).
+        for dx in [0.85_f32, -0.85] {
+            c.spawn((
+                Mesh3d(art.wheel.clone()),
+                MeshMaterial3d(shared.wood.clone()),
+                Transform::from_xyz(dx, 0.58, 0.0)
+                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+            ));
+        }
+        c.spawn((
+            Mesh3d(art.gun_axle.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 0.6, 0.0),
+        ));
+        c.spawn((
+            Mesh3d(art.gun_shield.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 0.78, 0.25),
+        ));
+        // Barrel, angled up toward the enemy (local +Z).
+        c.spawn((
+            Mesh3d(art.gun_barrel.clone()),
+            MeshMaterial3d(shared.metal.clone()),
+            Transform::from_xyz(0.0, 0.85, 1.0)
+                .with_rotation(Quat::from_rotation_x(-0.18)),
+        ));
+        // Trail leg out the back.
+        c.spawn((
+            Mesh3d(art.gun_trail.clone()),
+            MeshMaterial3d(shared.wood.clone()),
+            Transform::from_xyz(0.0, 0.35, -0.95),
+        ));
+    });
 }
 
 // ---- UI overlay -----------------------------------------------------------
@@ -319,7 +611,7 @@ fn setup_ui(mut commands: Commands) {
         })
         .with_children(|p| {
             p.spawn((
-                Text::new("War.v2  -  WWI Western Front"),
+                Text::new("War.v2  -  WWI Trench Warfare"),
                 TextFont {
                     font_size: FontSize::Px(26.0),
                     ..default()
@@ -327,7 +619,7 @@ fn setup_ui(mut commands: Commands) {
                 TextColor(Color::srgb(0.12, 0.12, 0.12)),
             ));
             p.spawn((
-                Text::new("British (khaki)  vs  Central Powers (field-grey)"),
+                Text::new("Deployment: British (khaki, south)  vs  Central Powers (grey, north)"),
                 TextFont {
                     font_size: FontSize::Px(15.0),
                     ..default()
@@ -335,16 +627,23 @@ fn setup_ui(mut commands: Commands) {
                 TextColor(Color::srgb(0.20, 0.20, 0.20)),
             ));
             p.spawn((
-                Text::new("WASD / arrows: pan the battlefield"),
+                Text::new("Units: infantry . snipers . machine guns . artillery . runners . scouts"),
                 TextFont {
                     font_size: FontSize::Px(14.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.25, 0.25, 0.25)),
+                TextColor(Color::srgb(0.24, 0.24, 0.24)),
+            ));
+            p.spawn((
+                Text::new("WASD / arrows: pan the front"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.28, 0.28, 0.28)),
             ));
         });
 
-    // Version badge, bottom-right, wired to the crate version.
     commands.spawn((
         Text::new(concat!("v", env!("CARGO_PKG_VERSION"))),
         TextFont {
@@ -361,62 +660,8 @@ fn setup_ui(mut commands: Commands) {
     ));
 }
 
-// ---- Simulation -----------------------------------------------------------
+// ---- Camera ---------------------------------------------------------------
 
-/// March every soldier forward, then push overlapping soldiers apart so no two
-/// occupy the same space. Soldiers halt around no-man's-land.
-fn advance_units(time: Res<Time>, mut units: Query<(Entity, &mut Transform, &Unit)>) {
-    let dt = time.delta_secs();
-
-    // Snapshot positions so separation reads a consistent frame.
-    let snapshot: Vec<(Entity, Vec3)> = units
-        .iter()
-        .map(|(e, t, _)| (e, t.translation))
-        .collect();
-
-    for (entity, mut transform, unit) in &mut units {
-        let mut pos = transform.translation;
-        let advance = unit.faction.advance();
-
-        // March forward until the unit nears the centre line, then hold.
-        let dist_to_line = pos.z.abs();
-        if dist_to_line > 6.0 {
-            pos += advance * unit.speed * dt;
-        }
-
-        // Separation: push away from any neighbour within UNIT_RADIUS*2.
-        let mut push = Vec3::ZERO;
-        for (other, opos) in &snapshot {
-            if *other == entity {
-                continue;
-            }
-            let mut d = pos - *opos;
-            d.y = 0.0;
-            let dist = d.length();
-            let min_d = UNIT_RADIUS * 2.0;
-            if dist > 0.0001 && dist < min_d {
-                push += d.normalize() * (min_d - dist);
-            }
-        }
-        pos += push * 0.5;
-
-        // Keep on the field, feet on the ground.
-        pos.x = pos.x.clamp(-FIELD_X, FIELD_X);
-        pos.z = pos.z.clamp(-FIELD_Z, FIELD_Z);
-        pos.y = 0.0;
-
-        // Face the direction of travel (advance + jostle).
-        let mut heading = advance + push.normalize_or_zero() * 0.3;
-        heading.y = 0.0;
-        if heading.length() > 0.01 {
-            let yaw = Quat::from_rotation_arc(Vec3::Z, heading.normalize());
-            transform.rotation = transform.rotation.slerp(yaw, 1.0 - (-6.0 * dt).exp());
-        }
-        transform.translation = pos;
-    }
-}
-
-/// Pan the isometric camera across the field with WASD / arrow keys.
 fn pan_camera(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -438,7 +683,7 @@ fn pan_camera(
     }
 
     if dir != Vec3::ZERO {
-        focus.0 += dir.normalize() * 24.0 * time.delta_secs();
+        focus.0 += dir.normalize() * 26.0 * time.delta_secs();
         focus.0.x = focus.0.x.clamp(-FIELD_X, FIELD_X);
         focus.0.z = focus.0.z.clamp(-FIELD_Z, FIELD_Z);
     }
@@ -448,7 +693,3 @@ fn pan_camera(
         *transform = Transform::from_translation(eye).looking_at(focus.0, Vec3::Y);
     }
 }
-
-// Keep a reference to css so the palette import is always available for tuning.
-#[allow(dead_code)]
-const _PALETTE: Srgba = css::KHAKI;
