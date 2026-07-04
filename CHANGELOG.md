@@ -3,6 +3,20 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.9.0
+
+- **Command groups in setup.** In the Deploy tab, pick a command group (A, B,
+  C…) before placing your units — everything you place joins the active group.
+  Add more groups with **+**; placed units are colour-coded by group on the
+  mini-map.
+- **In-battle command panel.** A panel lists your groups with live survivor
+  counts. Click a group to select it (green rings), then click **Attack**,
+  **Move** or **Hold** — for Attack/Move, click the target/destination on the
+  field to issue the order to the whole group.
+- **Direct RTS controls still work** alongside the panel: left-click / drag to
+  select, right-click to move or attack. Clicks over the panel no longer leak
+  through to the battlefield.
+
 ## v0.8.0
 
 - **Combat visuals overhauled.** Small-arms fire is now fast, bright **tracer

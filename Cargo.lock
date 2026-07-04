@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "war_v2"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bevy",
  "console_error_panic_hook",

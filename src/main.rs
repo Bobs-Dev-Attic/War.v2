@@ -176,7 +176,42 @@ struct Placed {
     kind: UnitType,
     x: f32,
     z: f32,
+    group: u8,
 }
+
+/// Which command group a (player) unit belongs to.
+#[derive(Component, Clone, Copy)]
+struct GroupId(u8);
+
+/// The set of command groups the player deployed units into.
+#[derive(Resource, Default)]
+struct PlayerGroups(Vec<u8>);
+
+/// A command the player can issue to a group.
+#[derive(Clone, Copy, PartialEq)]
+enum CmdKind {
+    Attack,
+    Move,
+    Hold,
+}
+
+/// The pending command awaiting a target click (Attack/Move).
+#[derive(Resource, Default)]
+struct CommandMode {
+    pending: Option<CmdKind>,
+}
+
+/// Marks a group button in the command panel.
+#[derive(Component)]
+struct GroupButton(u8);
+
+/// Marks a command button in the command panel.
+#[derive(Component)]
+struct CmdButton(CmdKind);
+
+/// Marks the command-panel status line.
+#[derive(Component)]
+struct CmdStatus;
 
 /// All player-placed units (empty → fall back to the auto-garrison).
 #[derive(Resource, Default)]
@@ -217,6 +252,7 @@ fn read_deployment() -> Deployment {
         else {
             continue;
         };
+        let group = it.next().and_then(|g| g.parse::<u8>().ok()).unwrap_or(0);
         let faction = match side {
             "c" => Faction::Central,
             _ => Faction::British,
@@ -228,7 +264,13 @@ fn read_deployment() -> Deployment {
         ) else {
             continue;
         };
-        out.push(Placed { faction, kind, x, z });
+        out.push(Placed {
+            faction,
+            kind,
+            x,
+            z,
+            group,
+        });
     }
     Deployment(out)
 }
@@ -553,13 +595,14 @@ fn main() {
         .insert_resource(Rng(0x1234_5678))
         .init_resource::<DragBox>()
         .init_resource::<Casualties>()
-        .add_systems(Startup, (setup_world, setup_ui))
+        .init_resource::<CommandMode>()
+        .add_systems(Startup, (setup_world, setup_ui, setup_command_panel).chain())
+        // Input handling is chained so selection runs before command targeting.
+        .add_systems(Update, (selection_input, order_input, command_targeting).chain())
         .add_systems(
             Update,
             (
                 pan_camera,
-                selection_input,
-                order_input,
                 ai_command,
                 combat_fire,
                 projectile_flight,
@@ -570,6 +613,10 @@ fn main() {
                 ephemeral_cleanup,
                 hud_update,
             ),
+        )
+        .add_systems(
+            Update,
+            (group_panel_click, command_panel_click, group_count_update),
         )
         .run();
 }
@@ -726,10 +773,12 @@ fn setup_world(
         spawn_trench(&mut commands, &art, &shared, &mut rng, faction);
     }
 
+    let mut groups: Vec<u8> = Vec::new();
     if deployment.0.is_empty() {
         // No mini-map placements: fall back to the auto-garrison.
         garrison(&mut commands, &art, &shared, &fmats_b, &mut rng, Faction::British);
         garrison(&mut commands, &art, &shared, &fmats_c, &mut rng, Faction::Central);
+        groups = vec![0, 1, 2, 3]; // the garrison's role-based groups
     } else {
         // Build exactly what the player placed on the Deploy mini-map.
         for p in &deployment.0 {
@@ -748,9 +797,15 @@ fn setup_world(
                 p.kind,
                 Vec3::new(p.x, 0.0, p.z),
                 facing,
+                p.group,
             );
+            if p.faction == PLAYER && !groups.contains(&p.group) {
+                groups.push(p.group);
+            }
         }
     }
+    groups.sort_unstable();
+    commands.insert_resource(PlayerGroups(groups));
 }
 
 fn make_fmats(materials: &mut Assets<StandardMaterial>, faction: Faction) -> FactionMats {
@@ -880,29 +935,39 @@ fn garrison(
             UnitType::Infantry
         };
         let pos = Vec3::new(x, 0.0, z_line) + jitter(rng);
-        spawn_unit(commands, art, shared, fmats, faction, kind, pos, facing);
+        spawn_unit(commands, art, shared, fmats, faction, kind, pos, facing, group_for_kind(kind));
         x += 2.8;
     }
 
     // Scouts pushed forward toward no-man's-land.
     for sx in [-8.0_f32, 8.0] {
         let pos = Vec3::new(sx, 0.0, z_line + front * 2.6) + jitter(rng);
-        spawn_unit(commands, art, shared, fmats, faction, UnitType::Scout, pos, facing);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Scout, pos, facing, group_for_kind(UnitType::Scout));
     }
     // Runners between the trench and the guns.
     for rx in [-4.0_f32, 4.0] {
         let pos = Vec3::new(rx, 0.0, z_line - front * 3.5) + jitter(rng);
-        spawn_unit(commands, art, shared, fmats, faction, UnitType::Runner, pos, facing);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Runner, pos, facing, group_for_kind(UnitType::Runner));
     }
     // Artillery battery dug in behind the line.
     for gx in [-12.0_f32, 0.0, 12.0] {
         let pos = Vec3::new(gx, 0.0, z_line - front * 7.0);
-        spawn_unit(commands, art, shared, fmats, faction, UnitType::Artillery, pos, facing);
+        spawn_unit(commands, art, shared, fmats, faction, UnitType::Artillery, pos, facing, group_for_kind(UnitType::Artillery));
     }
 }
 
 /// Spawn one unit of `kind` at `pos` facing `facing`, assembling its low-poly
 /// model from shared meshes.
+/// Default command group for the auto-garrison (by role).
+fn group_for_kind(k: UnitType) -> u8 {
+    match k {
+        UnitType::Infantry | UnitType::Sniper => 0,
+        UnitType::MachineGunner => 1,
+        UnitType::Artillery => 2,
+        UnitType::Scout | UnitType::Runner => 3,
+    }
+}
+
 fn spawn_unit(
     commands: &mut Commands,
     art: &Meshes,
@@ -912,6 +977,7 @@ fn spawn_unit(
     kind: UnitType,
     pos: Vec3,
     facing: Quat,
+    group: u8,
 ) {
     let (hp, speed, range, damage, cooldown) = kind.stats();
     let mut e = commands.spawn((
@@ -927,6 +993,10 @@ fn spawn_unit(
             order: Order::Hold,
         },
     ));
+    // Only the player's units carry a command group.
+    if faction == PLAYER {
+        e.insert(GroupId(group));
+    }
 
     match kind {
         UnitType::Infantry => add_soldier(&mut e, art, shared, fmats, Pose::Stand, Head::Helmet, Weapon::Rifle),
@@ -1249,6 +1319,29 @@ fn xz_dist(a: Vec3, b: Vec3) -> f32 {
     Vec2::new(a.x - b.x, a.z - b.z).length()
 }
 
+/// True while the cursor is hovering/pressing any UI element.
+fn any_ui_active(ui: &Query<&Interaction>) -> bool {
+    ui.iter().any(|i| !matches!(i, Interaction::None))
+}
+
+fn clear_selection(
+    commands: &mut Commands,
+    selected: &Query<Entity, With<Selected>>,
+    children_q: &Query<&Children>,
+    rings: &Query<(), With<Ring>>,
+) {
+    for e in selected {
+        commands.entity(e).remove::<Selected>();
+        if let Ok(ch) = children_q.get(e) {
+            for c in ch.iter() {
+                if rings.get(c).is_ok() {
+                    commands.entity(c).despawn();
+                }
+            }
+        }
+    }
+}
+
 fn select_unit(commands: &mut Commands, ring: &RingArt, e: Entity) {
     commands.entity(e).insert(Selected).with_children(|c| {
         c.spawn((
@@ -1265,6 +1358,8 @@ fn selection_input(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     cam: Query<(&Camera, &GlobalTransform)>,
+    ui: Query<&Interaction>,
+    mode: Res<CommandMode>,
     mut drag: ResMut<DragBox>,
     mut commands: Commands,
     ring: Res<RingArt>,
@@ -1273,30 +1368,30 @@ fn selection_input(
     children_q: Query<&Children>,
     rings: Query<(), With<Ring>>,
 ) {
+    // Don't start a selection while targeting a command or clicking the panel.
+    if mode.pending.is_some() || any_ui_active(&ui) {
+        if mouse.just_pressed(MouseButton::Left) {
+            drag.start = None;
+        }
+        return;
+    }
     if mouse.just_pressed(MouseButton::Left) {
         drag.start = windows.single().ok().and_then(|w| w.cursor_position());
+        return;
     }
     if !mouse.just_released(MouseButton::Left) {
         return;
     }
     let end = windows.single().ok().and_then(|w| w.cursor_position());
-    let start = drag.start.take();
-
-    // Clear the previous selection (and its rings).
-    for e in &selected {
-        commands.entity(e).remove::<Selected>();
-        if let Ok(ch) = children_q.get(e) {
-            for c in ch.iter() {
-                if rings.get(c).is_ok() {
-                    commands.entity(c).despawn();
-                }
-            }
-        }
-    }
-
-    let (Some(s), Some(e)) = (start, end) else {
+    let Some(start) = drag.start.take() else {
         return;
     };
+    let Some(end) = end else {
+        return;
+    };
+
+    clear_selection(&mut commands, &selected, &children_q, &rings);
+    let (s, e) = (start, end);
 
     if s.distance(e) < 6.0 {
         // Click: nearest friendly unit to the ground point.
@@ -1339,20 +1434,30 @@ fn order_input(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     cam: Query<(&Camera, &GlobalTransform)>,
+    ui: Query<&Interaction>,
     units: Query<(Entity, &GlobalTransform, &Unit)>,
     mut selected: Query<&mut Fighter, With<Selected>>,
 ) {
-    if !mouse.just_pressed(MouseButton::Right) {
+    if !mouse.just_pressed(MouseButton::Right) || any_ui_active(&ui) {
         return;
     }
     let Some(gp) = cursor_ground(&windows, &cam) else {
         return;
     };
+    if let Some(te) = enemy_near(&units, gp) {
+        for mut f in &mut selected {
+            f.order = Order::Attack(te);
+        }
+    } else {
+        issue_move(&mut selected, gp);
+    }
+}
 
-    // Enemy under the cursor?
+/// Nearest enemy unit within a small radius of a ground point.
+fn enemy_near(units: &Query<(Entity, &GlobalTransform, &Unit)>, gp: Vec3) -> Option<Entity> {
     let mut enemy = None;
-    let mut bd = 2.6_f32;
-    for (e, gt, u) in &units {
+    let mut bd = 2.8_f32;
+    for (e, gt, u) in units {
         if u.faction == PLAYER {
             continue;
         }
@@ -1362,20 +1467,18 @@ fn order_input(
             enemy = Some(e);
         }
     }
+    enemy
+}
 
-    if let Some(te) = enemy {
-        for mut f in &mut selected {
-            f.order = Order::Attack(te);
-        }
-    } else {
-        let n = selected.iter().count().max(1);
-        let cols = (n as f32).sqrt().ceil() as i32;
-        for (i, mut f) in selected.iter_mut().enumerate() {
-            let i = i as i32;
-            let ox = ((i % cols) - cols / 2) as f32 * 2.0;
-            let oz = ((i / cols) - cols / 2) as f32 * 2.0;
-            f.order = Order::MoveTo(gp + Vec3::new(ox, 0.0, oz));
-        }
+/// Order the selected units to move to `gp` in a loose grid formation.
+fn issue_move(selected: &mut Query<&mut Fighter, With<Selected>>, gp: Vec3) {
+    let n = selected.iter().count().max(1);
+    let cols = (n as f32).sqrt().ceil() as i32;
+    for (i, mut f) in selected.iter_mut().enumerate() {
+        let i = i as i32;
+        let ox = ((i % cols) - cols / 2) as f32 * 2.0;
+        let oz = ((i / cols) - cols / 2) as f32 * 2.0;
+        f.order = Order::MoveTo(gp + Vec3::new(ox, 0.0, oz));
     }
 }
 
@@ -1812,5 +1915,273 @@ fn hud_update(
             "Selected: {n}    Casualties  -  British {}  /  Central {}",
             cas.british, cas.central
         ));
+    }
+}
+
+// ---- Group command panel --------------------------------------------------
+
+fn group_color(g: u8) -> Color {
+    const C: [(f32, f32, f32); 6] = [
+        (0.88, 0.33, 0.23),
+        (0.23, 0.56, 0.88),
+        (0.26, 0.70, 0.39),
+        (0.85, 0.63, 0.15),
+        (0.61, 0.35, 0.71),
+        (0.09, 0.71, 0.66),
+    ];
+    let (r, gr, b) = C[(g as usize) % 6];
+    Color::srgb(r, gr, b)
+}
+
+fn group_label(g: u8) -> &'static str {
+    ["A", "B", "C", "D", "E", "F"][(g as usize) % 6]
+}
+
+/// Build the bottom command panel: group buttons + Attack/Move/Hold + status.
+fn setup_command_panel(mut commands: Commands, groups: Res<PlayerGroups>) {
+    let panel_bg = Color::srgba(0.07, 0.07, 0.09, 0.74);
+    let label = |s: &str| {
+        (
+            Text::new(s),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::srgb(0.75, 0.75, 0.78)),
+        )
+    };
+
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(12.0),
+            left: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    padding: UiRect::all(Val::Px(10.0)),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(panel_bg),
+            ))
+            .with_children(|panel| {
+                // Groups row.
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(6.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn(label("Groups:"));
+                        for &g in &groups.0 {
+                            row.spawn((
+                                Button,
+                                GroupButton(g),
+                                Node {
+                                    padding: UiRect::axes(Val::Px(11.0), Val::Px(5.0)),
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(group_color(g)),
+                                BackgroundColor(Color::srgba(0.16, 0.16, 0.18, 0.95)),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new(group_label(g)),
+                                    TextFont {
+                                        font_size: FontSize::Px(15.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                ));
+                            });
+                        }
+                    });
+                // Command row.
+                panel
+                    .spawn(Node {
+                        column_gap: Val::Px(6.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn(label("Command:"));
+                        for (kind, text, col) in [
+                            (CmdKind::Attack, "Attack", Color::srgb(0.85, 0.30, 0.25)),
+                            (CmdKind::Move, "Move", Color::srgb(0.28, 0.55, 0.85)),
+                            (CmdKind::Hold, "Hold", Color::srgb(0.55, 0.55, 0.58)),
+                        ] {
+                            row.spawn((
+                                Button,
+                                CmdButton(kind),
+                                Node {
+                                    padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    ..default()
+                                },
+                                BorderColor::all(col),
+                                BackgroundColor(Color::srgba(0.16, 0.16, 0.18, 0.95)),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((
+                                    Text::new(text),
+                                    TextFont {
+                                        font_size: FontSize::Px(14.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                ));
+                            });
+                        }
+                    });
+                // Status line.
+                panel.spawn((
+                    CmdStatus,
+                    Text::new("Pick a group, then a command - or use the mouse directly."),
+                    TextFont {
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.65, 0.65, 0.7)),
+                ));
+            });
+        });
+}
+
+/// Clicking a group button selects that group's living units.
+fn group_panel_click(
+    buttons: Query<(&Interaction, &GroupButton), Changed<Interaction>>,
+    mut commands: Commands,
+    ring: Res<RingArt>,
+    units: Query<(Entity, &GroupId, &Unit)>,
+    selected: Query<Entity, With<Selected>>,
+    children_q: Query<&Children>,
+    rings: Query<(), With<Ring>>,
+    mut status: Query<&mut Text, With<CmdStatus>>,
+) {
+    for (inter, gb) in &buttons {
+        if *inter != Interaction::Pressed {
+            continue;
+        }
+        clear_selection(&mut commands, &selected, &children_q, &rings);
+        let mut n = 0;
+        for (e, gid, u) in &units {
+            if u.faction == PLAYER && gid.0 == gb.0 {
+                select_unit(&mut commands, &ring, e);
+                n += 1;
+            }
+        }
+        if let Ok(mut t) = status.single_mut() {
+            *t = Text::new(format!(
+                "Group {} selected ({} units) - choose a command.",
+                group_label(gb.0),
+                n
+            ));
+        }
+    }
+}
+
+/// Clicking a command button: Hold acts now; Attack/Move await a target click.
+fn command_panel_click(
+    buttons: Query<(&Interaction, &CmdButton), Changed<Interaction>>,
+    mut mode: ResMut<CommandMode>,
+    mut selected: Query<&mut Fighter, With<Selected>>,
+    mut status: Query<&mut Text, With<CmdStatus>>,
+) {
+    for (inter, cb) in &buttons {
+        if *inter != Interaction::Pressed {
+            continue;
+        }
+        let msg = match cb.0 {
+            CmdKind::Hold => {
+                for mut f in &mut selected {
+                    f.order = Order::Hold;
+                }
+                mode.pending = None;
+                "Holding position."
+            }
+            CmdKind::Attack => {
+                mode.pending = Some(CmdKind::Attack);
+                "ATTACK - click the target on the field."
+            }
+            CmdKind::Move => {
+                mode.pending = Some(CmdKind::Move);
+                "MOVE - click the destination on the field."
+            }
+        };
+        if let Ok(mut t) = status.single_mut() {
+            *t = Text::new(msg);
+        }
+    }
+}
+
+/// With a command pending, a left-click on the field resolves it.
+fn command_targeting(
+    mouse: Res<ButtonInput<MouseButton>>,
+    ui: Query<&Interaction>,
+    windows: Query<&Window>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    mut mode: ResMut<CommandMode>,
+    units: Query<(Entity, &GlobalTransform, &Unit)>,
+    mut selected: Query<&mut Fighter, With<Selected>>,
+    mut status: Query<&mut Text, With<CmdStatus>>,
+) {
+    let Some(cmd) = mode.pending else {
+        return;
+    };
+    if !mouse.just_pressed(MouseButton::Left) || any_ui_active(&ui) {
+        return;
+    }
+    let Some(gp) = cursor_ground(&windows, &cam) else {
+        return;
+    };
+    let msg = match cmd {
+        CmdKind::Move => {
+            issue_move(&mut selected, gp);
+            "Advancing."
+        }
+        CmdKind::Attack => {
+            if let Some(te) = enemy_near(&units, gp) {
+                for mut f in &mut selected {
+                    f.order = Order::Attack(te);
+                }
+                "Engaging the target."
+            } else {
+                issue_move(&mut selected, gp); // attack-move onto empty ground
+                "Attacking toward that position."
+            }
+        }
+        CmdKind::Hold => "",
+    };
+    mode.pending = None;
+    if let Ok(mut t) = status.single_mut() {
+        *t = Text::new(msg);
+    }
+}
+
+/// Keep each group button's label in sync with its surviving unit count.
+fn group_count_update(
+    buttons: Query<(&GroupButton, &Children)>,
+    mut texts: Query<&mut Text>,
+    units: Query<(&GroupId, &Unit)>,
+) {
+    for (gb, children) in &buttons {
+        let n = units
+            .iter()
+            .filter(|(gid, u)| u.faction == PLAYER && gid.0 == gb.0)
+            .count();
+        for c in children.iter() {
+            if let Ok(mut t) = texts.get_mut(c) {
+                *t = Text::new(format!("{} ({})", group_label(gb.0), n));
+            }
+        }
     }
 }

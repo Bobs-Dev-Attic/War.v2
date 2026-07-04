@@ -94,6 +94,17 @@
       .budget { font-size: 0.9rem; margin-bottom: 10px; }
       .budget .bar { height: 8px; border-radius: 4px; background: #cdbf98; overflow: hidden; margin-top: 4px; }
       .budget .bar > div { height: 100%; background: var(--accent); }
+      .groups { margin-bottom: 12px; }
+      .groups-label { font-size: 0.78rem; color: #6a6449; margin-bottom: 5px; }
+      .group-row { display: flex; gap: 6px; flex-wrap: wrap; }
+      .group-btn {
+        width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--line);
+        background: #f3eeda; cursor: pointer; font-weight: 700; color: var(--khaki-dark);
+        display: flex; align-items: center; justify-content: center; position: relative;
+      }
+      .group-btn .swatch { position: absolute; left: 3px; top: 3px; width: 7px; height: 7px; border-radius: 50%; }
+      .group-btn[aria-pressed="true"] { border-color: var(--accent); outline: 2px solid var(--accent); background: #fbf6e6; }
+      .group-btn.add { font-weight: 400; color: #6a6449; }
       .unit-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
       .unit-btn {
         display: flex; align-items: center; justify-content: space-between;
@@ -173,6 +184,10 @@
                   <button type="button" data-side="c" aria-pressed="false">Central (north)</button>
                 </div>
                 <div class="budget" id="budget"></div>
+                <div class="groups" id="groupsWrap">
+                  <div class="groups-label">Command group (British)</div>
+                  <div class="group-row" id="groupRow"></div>
+                </div>
                 <div class="unit-list" id="unitList"></div>
                 <button type="button" class="clear" id="clearSide">Clear this side</button>
               </div>
@@ -264,7 +279,9 @@
       const BUDGET = 60;
       const FAC_COLOR = { b: "#c8b463", c: "#889176" };
       const LOC_TINT = { somme: "#4d4633", ypres: "#414734", gallipoli: "#8a7346", sinai: "#a8905c", verdun: "#464331" };
-      let placeSide = "b", placeType = "inf";
+      const GROUP_COLORS = ["#e0553b", "#3b8fe0", "#43b463", "#d9a227", "#9b59b6", "#16b5a8"];
+      const GROUP_LETTERS = ["A", "B", "C", "D", "E", "F"];
+      let placeSide = "b", placeType = "inf", placeGroup = 0, groupsOpen = 1;
       let placed = [];
 
       const cvs = document.getElementById("minimap");
@@ -292,10 +309,30 @@
         for (const p of placed) {
           const [cx, cy] = w2c(p.x, p.z);
           const u = UNITS_DEF.find((x) => x.id === p.type);
-          ctx.fillStyle = FAC_COLOR[p.side];
-          ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.arc(cx, cy, u.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = p.side === "b" ? GROUP_COLORS[p.group || 0] : FAC_COLOR.c;
+          ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(cx, cy, u.r + (p.side === "b" ? 0.5 : 0), 0, Math.PI * 2); ctx.fill(); ctx.stroke();
           if (p.type === "art" || p.type === "mg") { ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(cx - 1, cy - 1, 2, 2); }
+        }
+      }
+
+      function buildGroupRow() {
+        document.getElementById("groupsWrap").style.display = placeSide === "b" ? "block" : "none";
+        const row = document.getElementById("groupRow");
+        row.innerHTML = "";
+        for (let g = 0; g < groupsOpen; g++) {
+          const b = document.createElement("button");
+          b.className = "group-btn"; b.type = "button";
+          b.setAttribute("aria-pressed", String(g === placeGroup));
+          b.innerHTML = `<span class="swatch" style="background:${GROUP_COLORS[g]}"></span>${GROUP_LETTERS[g]}`;
+          b.onclick = () => { placeGroup = g; buildGroupRow(); };
+          row.appendChild(b);
+        }
+        if (groupsOpen < 6) {
+          const add = document.createElement("button");
+          add.className = "group-btn add"; add.type = "button"; add.textContent = "+"; add.title = "Add a group";
+          add.onclick = () => { groupsOpen++; placeGroup = groupsOpen - 1; buildGroupRow(); };
+          row.appendChild(add);
         }
       }
 
@@ -339,7 +376,7 @@
         wx = Math.max(-38, Math.min(38, wx));
         const ok = placeSide === "b" ? wz <= -3 && wz >= -45 : wz >= 3 && wz <= 45;
         if (!ok || remaining(placeSide) < costOf(placeType)) { cvs.animate([{ filter: "brightness(1.4)" }, { filter: "brightness(1)" }], 180); return; }
-        placed.push({ side: placeSide, type: placeType, x: +wx.toFixed(2), z: +wz.toFixed(2) });
+        placed.push({ side: placeSide, type: placeType, x: +wx.toFixed(2), z: +wz.toFixed(2), group: placeSide === "b" ? placeGroup : 0 });
         drawMap(); updateDeploy();
       });
       cvs.addEventListener("contextmenu", (e) => {
@@ -354,21 +391,21 @@
         const b = e.target.closest("button"); if (!b) return;
         placeSide = b.dataset.side;
         for (const x of e.currentTarget.children) x.setAttribute("aria-pressed", String(x === b));
-        buildUnitList(); drawMap();
+        buildGroupRow(); buildUnitList(); drawMap();
       });
       document.getElementById("clearSide").onclick = () => {
         placed = placed.filter((p) => p.side !== placeSide);
         drawMap(); updateDeploy();
       };
 
-      buildUnitList(); drawMap();
+      buildGroupRow(); buildUnitList(); drawMap();
       deployReady = true;
 
       // Start: hand config to wasm, then boot the battle.
       document.getElementById("start").onclick = async () => {
         window.__WAR_LOCATION = sel.location;
         window.__WAR_WEATHER = sel.weather;
-        window.__WAR_UNITS = placed.map((p) => `${p.side}:${p.type}:${p.x}:${p.z}`).join(",");
+        window.__WAR_UNITS = placed.map((p) => `${p.side}:${p.type}:${p.x}:${p.z}:${p.group || 0}`).join(",");
         document.getElementById("setup").remove();
         const canvas = document.getElementById("bevy-canvas");
         const loading = document.getElementById("loading");
