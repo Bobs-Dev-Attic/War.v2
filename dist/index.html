@@ -125,10 +125,19 @@
       /* ---- Battle canvas ---- */
       #bevy-canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
       #loading {
-        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        position: fixed; inset: 0; display: flex; flex-direction: column; gap: 18px;
+        align-items: center; justify-content: center;
         color: #9fb4d4; font-size: 1.1rem; letter-spacing: 0.02em; pointer-events: none;
-        transition: opacity 0.4s ease; background: #0f1729;
+        transition: opacity 0.5s ease; background: #0f1729; text-align: center;
       }
+      #loading .spinner {
+        width: 46px; height: 46px; border-radius: 50%;
+        border: 4px solid rgba(159, 180, 212, 0.25);
+        border-top-color: #c8b463;
+        animation: spin 0.9s linear infinite;
+      }
+      #loading .sub { font-size: 0.85rem; color: #6f83a4; }
+      @keyframes spin { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
@@ -179,7 +188,11 @@
     </div>
 
     <canvas id="bevy-canvas" hidden></canvas>
-    <div id="loading" hidden>Deploying to the front (loading WebAssembly)…</div>
+    <div id="loading" hidden>
+      <div class="spinner"></div>
+      <div>Deploying to the front…</div>
+      <div class="sub">loading the battlefield (WebAssembly)</div>
+    </div>
 
     <script type="module">
       const LOCATIONS = [
@@ -360,15 +373,17 @@
         const canvas = document.getElementById("bevy-canvas");
         const loading = document.getElementById("loading");
         canvas.hidden = false; loading.hidden = false;
-        const dropLoader = () => { loading.style.opacity = "0"; setTimeout(() => loading.remove(), 500); };
-        setTimeout(dropLoader, 8000);
+        const dropLoader = () => { loading.style.opacity = "0"; setTimeout(() => loading.remove(), 600); };
+        // Safety net only — the loader normally stays up until init() resolves.
+        const safety = setTimeout(dropLoader, 60000);
         try {
           const { default: init } = await import("./war_v2.js");
           await init();
-          dropLoader();
+          // Give the first frame a moment to paint, then clear the loader.
+          requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(safety); dropLoader(); }));
         } catch (err) {
-          loading.textContent = "Failed to start the battle — see the console.";
-          loading.style.color = "#ff8080";
+          clearTimeout(safety);
+          loading.innerHTML = '<div style="color:#ff8080">Failed to start the battle — see the console.</div>';
           console.error(err);
         }
       };
