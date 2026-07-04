@@ -18,9 +18,11 @@ use bevy::camera::ScalingMode;
 
 const FIELD_X: f32 = 34.0; // half-width  (east/west)
 const FIELD_Z: f32 = 46.0; // half-depth  (north/south)
-const UNIT_RADIUS: f32 = 1.6; // separation radius (no overlap)
-const ROWS: i32 = 4;
-const COLS: i32 = 8;
+const UNIT_RADIUS: f32 = 0.55; // soldier separation radius (no overlap)
+const ROWS: i32 = 6;
+const COLS: i32 = 12;
+const FILE_SPACING: f32 = 2.2; // gap between soldiers left/right
+const RANK_SPACING: f32 = 2.2; // gap between ranks front/back
 
 /// The two belligerents. The player will command one of these in a later
 /// version; for now both advance under their own steam.
@@ -48,8 +50,8 @@ impl Faction {
     }
 }
 
-/// A vehicle on the field. `speed` is its forward march rate; separation from
-/// neighbours is applied on top so vehicles never occupy the same space.
+/// A soldier on the field. `speed` is their forward march rate; separation from
+/// neighbours is applied on top so no two soldiers occupy the same space.
 #[derive(Component)]
 struct Unit {
     faction: Faction,
@@ -121,7 +123,7 @@ fn setup_world(
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 60.0,
+                viewport_height: 34.0,
             },
             ..OrthographicProjection::default_3d()
         }),
@@ -188,14 +190,16 @@ fn setup_world(
         ));
     }
 
-    // Deploy the two armies in loose formation on opposite ends.
+    // Deploy the two armies facing off across no-man's-land, close enough that
+    // the clash is framed from the opening shot.
+    const DEPLOY_Z: f32 = 20.0;
     spawn_army(
         &mut commands,
         &mut meshes,
         &mut materials,
         &mut rng,
         Faction::British,
-        -FIELD_Z + 6.0,
+        -DEPLOY_Z,
     );
     spawn_army(
         &mut commands,
@@ -203,11 +207,14 @@ fn setup_world(
         &mut materials,
         &mut rng,
         Faction::Central,
-        FIELD_Z - 6.0,
+        DEPLOY_Z,
     );
 }
 
-/// Spawn one faction's formation at `base_z`, facing the centre line.
+/// Spawn one faction's infantry formation at `base_z`, facing the centre line.
+///
+/// Each soldier is a low-poly figure — legs, uniformed torso, helmeted head and
+/// a shouldered rifle — built from a handful of shared cuboid meshes.
 fn spawn_army(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -216,17 +223,34 @@ fn spawn_army(
     faction: Faction,
     base_z: f32,
 ) {
-    // Shared low-poly tank meshes (built once, instanced per unit).
-    let hull = meshes.add(Cuboid::new(2.2, 0.9, 3.2));
-    let turret = meshes.add(Cuboid::new(1.4, 0.7, 1.4));
-    let barrel = meshes.add(Cuboid::new(0.22, 0.22, 2.0));
-    let body_mat = materials.add(StandardMaterial {
+    // Shared low-poly soldier meshes (built once, instanced per soldier).
+    let legs = meshes.add(Cuboid::new(0.44, 0.62, 0.26));
+    let torso = meshes.add(Cuboid::new(0.50, 0.68, 0.30));
+    let head = meshes.add(Cuboid::new(0.26, 0.26, 0.26));
+    let helmet = meshes.add(Cuboid::new(0.34, 0.16, 0.34));
+    let rifle = meshes.add(Cuboid::new(0.07, 0.07, 0.95));
+
+    let uniform_mat = materials.add(StandardMaterial {
         base_color: faction.color().into(),
         perceptual_roughness: 0.95,
         ..default()
     });
-    let metal_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.10, 0.10, 0.10),
+    // Helmet: Brodie (British) vs Stahlhelm (Central) — both darker than the coat.
+    let helmet_mat = materials.add(StandardMaterial {
+        base_color: match faction {
+            Faction::British => Color::srgb(0.30, 0.28, 0.17),
+            Faction::Central => Color::srgb(0.22, 0.25, 0.20),
+        },
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let skin_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.56, 0.44),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let rifle_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.16, 0.11, 0.07), // wood/steel
         perceptual_roughness: 0.6,
         ..default()
     });
@@ -236,33 +260,45 @@ fn spawn_army(
 
     for row in 0..ROWS {
         for col in 0..COLS {
-            let x = (col as f32 - (COLS as f32 - 1.0) * 0.5) * 5.0 + rng.range(-0.8, 0.8);
-            let z = base_z - advance.z * (row as f32 * 4.5) + rng.range(-0.8, 0.8);
+            let x = (col as f32 - (COLS as f32 - 1.0) * 0.5) * FILE_SPACING + rng.range(-0.5, 0.5);
+            let z = base_z - advance.z * (row as f32 * RANK_SPACING) + rng.range(-0.5, 0.5);
 
             commands
                 .spawn((
-                    Transform::from_xyz(x, 0.45, z).with_rotation(facing),
+                    Transform::from_xyz(x, 0.0, z).with_rotation(facing),
                     Visibility::default(),
                     Unit {
                         faction,
-                        speed: rng.range(1.4, 2.4),
+                        speed: rng.range(1.6, 2.6),
                     },
                 ))
-                .with_children(|t| {
-                    t.spawn((
-                        Mesh3d(hull.clone()),
-                        MeshMaterial3d(body_mat.clone()),
-                        Transform::default(),
+                .with_children(|s| {
+                    s.spawn((
+                        Mesh3d(legs.clone()),
+                        MeshMaterial3d(uniform_mat.clone()),
+                        Transform::from_xyz(0.0, 0.31, 0.0),
                     ));
-                    t.spawn((
-                        Mesh3d(turret.clone()),
-                        MeshMaterial3d(body_mat.clone()),
-                        Transform::from_xyz(0.0, 0.7, -0.2),
+                    s.spawn((
+                        Mesh3d(torso.clone()),
+                        MeshMaterial3d(uniform_mat.clone()),
+                        Transform::from_xyz(0.0, 0.96, 0.0),
                     ));
-                    t.spawn((
-                        Mesh3d(barrel.clone()),
-                        MeshMaterial3d(metal_mat.clone()),
-                        Transform::from_xyz(0.0, 0.75, 1.0),
+                    s.spawn((
+                        Mesh3d(head.clone()),
+                        MeshMaterial3d(skin_mat.clone()),
+                        Transform::from_xyz(0.0, 1.40, 0.0),
+                    ));
+                    s.spawn((
+                        Mesh3d(helmet.clone()),
+                        MeshMaterial3d(helmet_mat.clone()),
+                        Transform::from_xyz(0.0, 1.56, 0.0),
+                    ));
+                    // Rifle held across the body, angled forward.
+                    s.spawn((
+                        Mesh3d(rifle.clone()),
+                        MeshMaterial3d(rifle_mat.clone()),
+                        Transform::from_xyz(0.17, 0.95, 0.28)
+                            .with_rotation(Quat::from_rotation_x(-0.35)),
                     ));
                 });
         }
@@ -327,8 +363,8 @@ fn setup_ui(mut commands: Commands) {
 
 // ---- Simulation -----------------------------------------------------------
 
-/// March every unit forward, then push overlapping units apart so no two
-/// vehicles occupy the same space. Units halt around no-man's-land.
+/// March every soldier forward, then push overlapping soldiers apart so no two
+/// occupy the same space. Soldiers halt around no-man's-land.
 fn advance_units(time: Res<Time>, mut units: Query<(Entity, &mut Transform, &Unit)>) {
     let dt = time.delta_secs();
 
@@ -364,10 +400,10 @@ fn advance_units(time: Res<Time>, mut units: Query<(Entity, &mut Transform, &Uni
         }
         pos += push * 0.5;
 
-        // Keep on the field.
+        // Keep on the field, feet on the ground.
         pos.x = pos.x.clamp(-FIELD_X, FIELD_X);
         pos.z = pos.z.clamp(-FIELD_Z, FIELD_Z);
-        pos.y = 0.45;
+        pos.y = 0.0;
 
         // Face the direction of travel (advance + jostle).
         let mut heading = advance + push.normalize_or_zero() * 0.3;

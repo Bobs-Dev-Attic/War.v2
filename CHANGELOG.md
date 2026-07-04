@@ -3,6 +3,15 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.3.1
+
+- **Soldiers, not tanks**: the units you'll command are low-poly infantry —
+  legs, uniformed torso, helmeted head (Brodie / Stahlhelm) and a shouldered
+  rifle — replacing the placeholder tanks.
+- Tighter infantry-scale formations and separation radius; more troops per side.
+- Camera zoomed in and armies deployed closer to the line so the clash is framed
+  from the opening shot.
+
 ## v0.3.0
 
 - Pivot from the 2D grid to an **isometric 3D** battlefield: orthographic iso
