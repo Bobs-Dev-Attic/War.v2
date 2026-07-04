@@ -3,6 +3,20 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.6.0
+
+- **Deploy tab — top-down mini-map placement.** Pick a side (British / Central),
+  pick a unit type, and left-click your half of the mini-map to place units;
+  right-click removes the nearest. You position **both** armies.
+- **Points budget**: each side has 60 points; unit types cost differently
+  (infantry/runner 1, scout 2, sniper 3, machine gun 4, artillery 8). A live
+  budget bar and per-type counts keep you honest. The mini-map is tinted by the
+  chosen location and marks both trench lines and no-man's-land.
+- **Start Battle builds exactly what you placed** — the 3D battle spawns your
+  units at their mini-map positions (the auto-garrison remains only as a fallback
+  when you place nothing).
+- Placements are handed to the wasm battle as a compact `side:type:x:z` list.
+
 ## v0.5.0
 
 - **Pre-battle setup page**: a tabbed HTML screen loads first (deferring the
