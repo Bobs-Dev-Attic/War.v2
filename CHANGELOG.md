@@ -3,6 +3,20 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.5.0
+
+- **Pre-battle setup page**: a tabbed HTML screen loads first (deferring the
+  wasm download until you commit). Choose your **location** (The Somme, Ypres,
+  Gallipoli, Sinai & Palestine, Verdun) and **weather** (clear, overcast, rain,
+  fog, snow), then hit **Start Battle**.
+- The battlefield is **generated to match**: each location sets the terrain
+  palette and crater density; each weather sets the sky, lighting, ground
+  wetness and distance fog. e.g. Gallipoli + Fog = sandy ground under a haze.
+- The setup config is handed to the Bevy wasm battle via the browser globals the
+  page sets before boot; the chosen location/weather is shown in-game.
+- A **Deploy** tab is present as a placeholder — top-down mini-map unit placement
+  for both sides lands in v0.6.0.
+
 ## v0.4.0
 
 - **Trench warfare**: each side now has a sandbagged trench line — duckboard
