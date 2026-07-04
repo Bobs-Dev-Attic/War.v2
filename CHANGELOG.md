@@ -3,6 +3,22 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.7.0
+
+- **The battle is now live and commandable (real-time strategy).** You command
+  the British; the Central army you placed is driven by AI.
+- **RTS controls**: left-click a unit or left-drag a box to select your troops
+  (selected units get a green ring); right-click the ground to move there in
+  formation, or right-click an enemy to attack.
+- **Full combat**: every armed unit auto-fires at the nearest enemy in range
+  with a visible tracer, dealing damage; units die and are removed when their
+  hit points reach zero. Per-type stats (hp, range, damage, rate of fire, speed)
+  differentiate infantry, snipers, machine gunners, artillery, scouts (runners
+  are unarmed couriers).
+- **Enemy AI** advance-attacks the nearest player unit. A live **HUD** shows the
+  selected count and running casualties for both sides.
+- Sim runs continuously so the battle never stalls.
+
 ## v0.6.0
 
 - **Deploy tab — top-down mini-map placement.** Pick a side (British / Central),

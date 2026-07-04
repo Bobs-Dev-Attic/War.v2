@@ -10,7 +10,10 @@
 use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 use bevy::camera::ScalingMode;
+use bevy::color::LinearRgba;
 use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::winit::{UpdateMode, WinitSettings};
+use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 
 // ---- Setup config (chosen on the HTML setup page) -------------------------
@@ -317,10 +320,96 @@ enum UnitType {
 
 /// A deployed unit.
 #[derive(Component)]
-#[allow(dead_code)]
 struct Unit {
     faction: Faction,
     kind: UnitType,
+}
+
+/// The side the human player commands. The other side is AI-driven.
+const PLAYER: Faction = Faction::British;
+
+/// Hit points.
+#[derive(Component)]
+struct Health {
+    hp: f32,
+    max: f32,
+}
+
+/// What a unit is currently trying to do.
+#[derive(Clone, Copy, PartialEq)]
+enum Order {
+    Hold,
+    MoveTo(Vec3),
+    Attack(Entity),
+}
+
+/// Movement + weapon state.
+#[derive(Component)]
+struct Fighter {
+    speed: f32,
+    range: f32,
+    damage: f32,
+    cooldown: Timer,
+    order: Order,
+}
+
+/// Marks a currently-selected (player) unit.
+#[derive(Component)]
+struct Selected;
+
+/// A selection ring (child of a selected unit).
+#[derive(Component)]
+struct Ring;
+
+/// A fading tracer / muzzle line.
+#[derive(Component)]
+struct Tracer {
+    life: Timer,
+}
+
+/// The live HUD line (selected count + casualties).
+#[derive(Component)]
+struct HudText;
+
+/// Shared selection-ring art.
+#[derive(Resource)]
+struct RingArt {
+    mesh: Handle<Mesh>,
+    mat: Handle<StandardMaterial>,
+}
+
+/// Shared tracer art (a unit-length beam scaled per shot).
+#[derive(Resource)]
+struct TracerArt {
+    mesh: Handle<Mesh>,
+    mat: Handle<StandardMaterial>,
+}
+
+/// Screen-space start of a left-drag selection box.
+#[derive(Resource, Default)]
+struct DragBox {
+    start: Option<Vec2>,
+}
+
+/// Running casualty tally.
+#[derive(Resource, Default)]
+struct Casualties {
+    british: u32,
+    central: u32,
+}
+
+impl UnitType {
+    /// (hp, move speed, weapon range, damage per shot, cooldown seconds)
+    fn stats(self) -> (f32, f32, f32, f32, f32) {
+        match self {
+            UnitType::Infantry => (100.0, 3.2, 22.0, 18.0, 1.1),
+            UnitType::Sniper => (70.0, 2.6, 40.0, 60.0, 2.6),
+            UnitType::MachineGunner => (130.0, 2.0, 28.0, 10.0, 0.28),
+            UnitType::Artillery => (160.0, 1.1, 60.0, 95.0, 4.2),
+            UnitType::Runner => (80.0, 5.0, 0.0, 0.0, 1.0), // unarmed
+            UnitType::Scout => (80.0, 4.2, 18.0, 12.0, 1.3),
+        }
+    }
 }
 
 /// Camera focus point on the ground; the iso camera is a fixed offset from it.
@@ -410,13 +499,34 @@ fn main() {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
+        // Real-time sim: keep updating even when the window loses focus, so the
+        // battle never stalls (browsers still throttle fully-hidden tabs).
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        })
         .insert_resource(read_setup())
         .insert_resource(read_deployment())
         .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72)))
         .insert_resource(CameraFocus(Vec3::ZERO))
         .insert_resource(Rng(0x1234_5678))
+        .init_resource::<DragBox>()
+        .init_resource::<Casualties>()
         .add_systems(Startup, (setup_world, setup_ui))
-        .add_systems(Update, pan_camera)
+        .add_systems(
+            Update,
+            (
+                pan_camera,
+                selection_input,
+                order_input,
+                ai_command,
+                combat_fire,
+                movement,
+                death_cleanup,
+                tracer_cleanup,
+                hud_update,
+            ),
+        )
         .run();
 }
 
@@ -521,6 +631,27 @@ fn setup_world(
 
     let fmats_b = make_fmats(&mut materials, Faction::British);
     let fmats_c = make_fmats(&mut materials, Faction::Central);
+
+    // Selection-ring art (bright, unlit so it reads through the fog).
+    commands.insert_resource(RingArt {
+        mesh: meshes.add(Torus::new(0.85, 1.05)),
+        mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 1.0, 0.45),
+            emissive: LinearRgba::rgb(0.2, 0.9, 0.3),
+            unlit: true,
+            ..default()
+        }),
+    });
+    // Tracer art (unit-length beam, scaled to each shot).
+    commands.insert_resource(TracerArt {
+        mesh: meshes.add(Cuboid::new(0.06, 0.06, 1.0)),
+        mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.85, 0.4),
+            emissive: LinearRgba::rgb(1.4, 1.0, 0.35),
+            unlit: true,
+            ..default()
+        }),
+    });
 
     // Trenches are always dug for both sides.
     for faction in [Faction::British, Faction::Central] {
@@ -714,10 +845,19 @@ fn spawn_unit(
     pos: Vec3,
     facing: Quat,
 ) {
+    let (hp, speed, range, damage, cooldown) = kind.stats();
     let mut e = commands.spawn((
         Transform::from_translation(pos).with_rotation(facing),
         Visibility::default(),
         Unit { faction, kind },
+        Health { hp, max: hp },
+        Fighter {
+            speed,
+            range,
+            damage,
+            cooldown: Timer::from_seconds(cooldown, TimerMode::Once),
+            order: Order::Hold,
+        },
     ));
 
     match kind {
@@ -945,7 +1085,9 @@ fn setup_ui(mut commands: Commands, setup: Res<Setup>) {
                 TextColor(Color::srgb(0.20, 0.20, 0.20)),
             ));
             p.spawn((
-                Text::new("Units: infantry . snipers . machine guns . artillery . runners . scouts"),
+                Text::new(
+                    "Left-click / drag: select your troops  .  right-click: move or attack  .  WASD: pan",
+                ),
                 TextFont {
                     font_size: FontSize::Px(14.0),
                     ..default()
@@ -953,12 +1095,13 @@ fn setup_ui(mut commands: Commands, setup: Res<Setup>) {
                 TextColor(Color::srgb(0.24, 0.24, 0.24)),
             ));
             p.spawn((
-                Text::new("WASD / arrows: pan the front"),
+                HudText,
+                Text::new("Selected: 0    Casualties  -  British 0  /  Central 0"),
                 TextFont {
-                    font_size: FontSize::Px(14.0),
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.28, 0.28, 0.28)),
+                TextColor(Color::srgb(0.10, 0.10, 0.10)),
             ));
         });
 
@@ -1009,5 +1152,387 @@ fn pan_camera(
     if let Ok(mut transform) = cam.single_mut() {
         let eye = focus.0 + ISO_DIR.normalize() * CAM_DIST;
         *transform = Transform::from_translation(eye).looking_at(focus.0, Vec3::Y);
+    }
+}
+
+// ---- Real-time battle -----------------------------------------------------
+
+/// Ray-cast the cursor onto the ground plane (y = 0).
+fn cursor_ground(
+    windows: &Query<&Window>,
+    cam: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<Vec3> {
+    let window = windows.single().ok()?;
+    let cursor = window.cursor_position()?;
+    let (camera, gt) = cam.single().ok()?;
+    let ray = camera.viewport_to_world(gt, cursor).ok()?;
+    let dy = ray.direction.y;
+    if dy.abs() < 1e-5 {
+        return None;
+    }
+    let t = -ray.origin.y / dy;
+    if t < 0.0 {
+        return None;
+    }
+    Some(ray.origin + *ray.direction * t)
+}
+
+fn xz_dist(a: Vec3, b: Vec3) -> f32 {
+    Vec2::new(a.x - b.x, a.z - b.z).length()
+}
+
+fn select_unit(commands: &mut Commands, ring: &RingArt, e: Entity) {
+    commands.entity(e).insert(Selected).with_children(|c| {
+        c.spawn((
+            Ring,
+            Mesh3d(ring.mesh.clone()),
+            MeshMaterial3d(ring.mat.clone()),
+            Transform::from_xyz(0.0, 0.12, 0.0),
+        ));
+    });
+}
+
+/// Left-click selects the friendly unit under the cursor; left-drag box-selects.
+fn selection_input(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    mut drag: ResMut<DragBox>,
+    mut commands: Commands,
+    ring: Res<RingArt>,
+    units: Query<(Entity, &GlobalTransform, &Unit)>,
+    selected: Query<Entity, With<Selected>>,
+    children_q: Query<&Children>,
+    rings: Query<(), With<Ring>>,
+) {
+    if mouse.just_pressed(MouseButton::Left) {
+        drag.start = windows.single().ok().and_then(|w| w.cursor_position());
+    }
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let end = windows.single().ok().and_then(|w| w.cursor_position());
+    let start = drag.start.take();
+
+    // Clear the previous selection (and its rings).
+    for e in &selected {
+        commands.entity(e).remove::<Selected>();
+        if let Ok(ch) = children_q.get(e) {
+            for c in ch.iter() {
+                if rings.get(c).is_ok() {
+                    commands.entity(c).despawn();
+                }
+            }
+        }
+    }
+
+    let (Some(s), Some(e)) = (start, end) else {
+        return;
+    };
+
+    if s.distance(e) < 6.0 {
+        // Click: nearest friendly unit to the ground point.
+        if let Some(gp) = cursor_ground(&windows, &cam) {
+            let mut best = None;
+            let mut bd = 2.2_f32;
+            for (ent, gt, u) in &units {
+                if u.faction != PLAYER {
+                    continue;
+                }
+                let d = xz_dist(gt.translation(), gp);
+                if d < bd {
+                    bd = d;
+                    best = Some(ent);
+                }
+            }
+            if let Some(ent) = best {
+                select_unit(&mut commands, &ring, ent);
+            }
+        }
+    } else if let Ok((camera, cgt)) = cam.single() {
+        // Drag box: every friendly unit whose screen position is inside it.
+        let (min, max) = (s.min(e), s.max(e));
+        for (ent, gt, u) in &units {
+            if u.faction != PLAYER {
+                continue;
+            }
+            if let Ok(sp) = camera.world_to_viewport(cgt, gt.translation()) {
+                if sp.x >= min.x && sp.x <= max.x && sp.y >= min.y && sp.y <= max.y {
+                    select_unit(&mut commands, &ring, ent);
+                }
+            }
+        }
+    }
+}
+
+/// Right-click orders the selected units: attack an enemy under the cursor, or
+/// move to the ground point in a loose formation.
+fn order_input(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    units: Query<(Entity, &GlobalTransform, &Unit)>,
+    mut selected: Query<&mut Fighter, With<Selected>>,
+) {
+    if !mouse.just_pressed(MouseButton::Right) {
+        return;
+    }
+    let Some(gp) = cursor_ground(&windows, &cam) else {
+        return;
+    };
+
+    // Enemy under the cursor?
+    let mut enemy = None;
+    let mut bd = 2.6_f32;
+    for (e, gt, u) in &units {
+        if u.faction == PLAYER {
+            continue;
+        }
+        let d = xz_dist(gt.translation(), gp);
+        if d < bd {
+            bd = d;
+            enemy = Some(e);
+        }
+    }
+
+    if let Some(te) = enemy {
+        for mut f in &mut selected {
+            f.order = Order::Attack(te);
+        }
+    } else {
+        let n = selected.iter().count().max(1);
+        let cols = (n as f32).sqrt().ceil() as i32;
+        for (i, mut f) in selected.iter_mut().enumerate() {
+            let i = i as i32;
+            let ox = ((i % cols) - cols / 2) as f32 * 2.0;
+            let oz = ((i / cols) - cols / 2) as f32 * 2.0;
+            f.order = Order::MoveTo(gp + Vec3::new(ox, 0.0, oz));
+        }
+    }
+}
+
+/// Simple enemy AI: each AI unit attack-moves toward the nearest player unit.
+fn ai_command(
+    units: Query<(Entity, &GlobalTransform, &Unit)>,
+    mut ai: Query<(&GlobalTransform, &Unit, &mut Fighter)>,
+) {
+    let enemies: Vec<(Entity, Vec3)> = units
+        .iter()
+        .filter(|(_, _, u)| u.faction == PLAYER)
+        .map(|(e, gt, _)| (e, gt.translation()))
+        .collect();
+    if enemies.is_empty() {
+        return;
+    }
+    for (gt, u, mut f) in &mut ai {
+        if u.faction == PLAYER {
+            continue;
+        }
+        let keep = matches!(f.order, Order::Attack(t) if enemies.iter().any(|(e, _)| *e == t));
+        if keep {
+            continue;
+        }
+        let p = gt.translation();
+        let mut best = None;
+        let mut bd = f32::MAX;
+        for (e, ep) in &enemies {
+            let d = (*ep - p).length();
+            if d < bd {
+                bd = d;
+                best = Some(*e);
+            }
+        }
+        if let Some(te) = best {
+            f.order = Order::Attack(te);
+        }
+    }
+}
+
+/// Units auto-fire at the nearest enemy within weapon range, spawning a tracer
+/// and dealing damage.
+fn combat_fire(
+    time: Res<Time>,
+    mut commands: Commands,
+    tracer: Res<TracerArt>,
+    positions: Query<(Entity, &GlobalTransform, &Unit)>,
+    mut shooters: Query<(&GlobalTransform, &Unit, &mut Fighter)>,
+    mut healths: Query<&mut Health>,
+) {
+    let dt = time.delta();
+    let snap: Vec<(Entity, Vec3, Faction)> = positions
+        .iter()
+        .map(|(e, gt, u)| (e, gt.translation(), u.faction))
+        .collect();
+
+    let mut shots: Vec<(Vec3, Vec3, Entity, f32)> = Vec::new();
+    for (gt, u, mut f) in &mut shooters {
+        f.cooldown.tick(dt);
+        if f.range <= 0.0 || !f.cooldown.is_finished() {
+            continue;
+        }
+        let p = gt.translation();
+        let mut best = None;
+        let mut bd = f.range;
+        for (e, ep, ef) in &snap {
+            if *ef == u.faction {
+                continue;
+            }
+            let d = (*ep - p).length();
+            if d <= bd {
+                bd = d;
+                best = Some((*e, *ep));
+            }
+        }
+        if let Some((te, tp)) = best {
+            f.cooldown.reset();
+            shots.push((p, tp, te, f.damage));
+        }
+    }
+
+    for (from, to, te, dmg) in shots {
+        if let Ok(mut h) = healths.get_mut(te) {
+            h.hp -= dmg;
+        }
+        spawn_tracer(&mut commands, &tracer, from, to);
+    }
+}
+
+fn spawn_tracer(commands: &mut Commands, tracer: &TracerArt, from: Vec3, to: Vec3) {
+    let a = from + Vec3::Y * 0.9;
+    let b = to + Vec3::Y * 0.9;
+    let dir = b - a;
+    let len = dir.length();
+    if len < 0.05 {
+        return;
+    }
+    let mut t = Transform::from_translation((a + b) * 0.5)
+        .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir / len));
+    t.scale.z = len;
+    commands.spawn((
+        Mesh3d(tracer.mesh.clone()),
+        MeshMaterial3d(tracer.mat.clone()),
+        t,
+        Tracer {
+            life: Timer::from_seconds(0.12, TimerMode::Once),
+        },
+    ));
+}
+
+/// Move each unit toward its order goal, separating so none overlap, and face
+/// the direction of travel.
+fn movement(time: Res<Time>, mut q: Query<(Entity, &mut Transform, &mut Fighter)>) {
+    let dt = time.delta_secs();
+    let snap: Vec<(Entity, Vec3)> = q.iter().map(|(e, t, _)| (e, t.translation)).collect();
+    let posmap: HashMap<Entity, Vec3> = snap.iter().copied().collect();
+
+    for (e, mut tf, mut f) in &mut q {
+        let mut pos = tf.translation;
+
+        let goal = match f.order {
+            Order::Hold => None,
+            Order::MoveTo(p) => {
+                if xz_dist(pos, p) < 1.0 {
+                    f.order = Order::Hold;
+                    None
+                } else {
+                    Some(p)
+                }
+            }
+            Order::Attack(te) => match posmap.get(&te) {
+                Some(tp) => {
+                    if xz_dist(pos, *tp) > f.range * 0.85 {
+                        Some(*tp)
+                    } else {
+                        None // in range — hold and fire
+                    }
+                }
+                None => {
+                    f.order = Order::Hold;
+                    None
+                }
+            },
+        };
+
+        if let Some(g) = goal {
+            let mut d = g - pos;
+            d.y = 0.0;
+            let dist = d.length();
+            if dist > 0.001 {
+                pos += d.normalize() * f.speed * dt;
+            }
+        }
+
+        // Separation.
+        let mut push = Vec3::ZERO;
+        for (oe, op) in &snap {
+            if *oe == e {
+                continue;
+            }
+            let mut d = pos - *op;
+            d.y = 0.0;
+            let dd = d.length();
+            if dd > 0.0001 && dd < 1.1 {
+                push += d.normalize() * (1.1 - dd);
+            }
+        }
+        pos += push * 0.5;
+        pos.x = pos.x.clamp(-FIELD_X, FIELD_X);
+        pos.z = pos.z.clamp(-FIELD_Z, FIELD_Z);
+        pos.y = 0.0;
+
+        if let Some(g) = goal {
+            let mut h = g - tf.translation;
+            h.y = 0.0;
+            if h.length() > 0.01 {
+                let yaw = Quat::from_rotation_arc(Vec3::Z, h.normalize());
+                tf.rotation = tf.rotation.slerp(yaw, 1.0 - (-6.0 * dt).exp());
+            }
+        }
+        tf.translation = pos;
+    }
+}
+
+/// Despawn units that have run out of hit points and tally the loss.
+fn death_cleanup(
+    mut commands: Commands,
+    mut cas: ResMut<Casualties>,
+    q: Query<(Entity, &Unit, &Health)>,
+) {
+    for (e, u, h) in &q {
+        if h.hp <= 0.0 {
+            match u.faction {
+                Faction::British => cas.british += 1,
+                Faction::Central => cas.central += 1,
+            }
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Fade out and remove spent tracers.
+fn tracer_cleanup(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Tracer)>,
+) {
+    for (e, mut t) in &mut q {
+        if t.life.tick(time.delta()).is_finished() {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Keep the HUD line (selected count + casualties) up to date.
+fn hud_update(
+    cas: Res<Casualties>,
+    selected: Query<(), With<Selected>>,
+    mut text: Query<&mut Text, With<HudText>>,
+) {
+    let n = selected.iter().count();
+    if let Ok(mut t) = text.single_mut() {
+        *t = Text::new(format!(
+            "Selected: {n}    Casualties  -  British {}  /  Central {}",
+            cas.british, cas.central
+        ));
     }
 }
