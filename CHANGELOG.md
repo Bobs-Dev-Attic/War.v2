@@ -3,6 +3,19 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.3.0
+
+- Pivot from the 2D grid to an **isometric 3D** battlefield: orthographic iso
+  camera, low-poly muddy terrain with a no-man's-land strip and scattered
+  craters, directional sun + shadows.
+- Two low-poly tank armies — **British** (khaki) and **Central Powers /
+  Ottoman-German** (field-grey) — deploy in formation and advance on the centre
+  line, separating so no two vehicles overlap (carries the collision rule into
+  continuous 3D space).
+- Camera panning with WASD / arrow keys.
+- Foundation for the WWI RTS: rigid-body physics, unit command and playable
+  factions land in later versions.
+
 ## v0.2.0
 
 - Show the version on screen (bottom-center badge) so the deployed build is
