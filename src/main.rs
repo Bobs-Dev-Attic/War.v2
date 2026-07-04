@@ -361,9 +361,41 @@ struct Selected;
 #[derive(Component)]
 struct Ring;
 
-/// A fading tracer / muzzle line.
+/// A projectile in flight — a bullet tracer (straight) or an artillery shell
+/// (arcing). Damage for bullets is applied hitscan at fire time, so bullets are
+/// purely visual; shells deal area damage on impact.
 #[derive(Component)]
-struct Tracer {
+struct Projectile {
+    from: Vec3,
+    to: Vec3,
+    t: f32,
+    dur: f32,
+    arc: f32, // apex height; 0 for a straight bullet
+    shell: bool,
+    damage: f32,
+    radius: f32,
+    faction: Faction,
+}
+
+/// An expanding, fading explosion flash (owns its material so it can fade).
+#[derive(Component)]
+struct Explosion {
+    life: Timer,
+    max_scale: f32,
+    mat: Handle<StandardMaterial>,
+}
+
+/// A tumbling debris chunk thrown by an explosion.
+#[derive(Component)]
+struct Debris {
+    vel: Vec3,
+    spin: Vec3,
+    life: Timer,
+}
+
+/// A short-lived effect (muzzle flash, impact spark) that just despawns.
+#[derive(Component)]
+struct Ephemeral {
     life: Timer,
 }
 
@@ -378,11 +410,20 @@ struct RingArt {
     mat: Handle<StandardMaterial>,
 }
 
-/// Shared tracer art (a unit-length beam scaled per shot).
+/// Shared art for projectiles and explosion effects.
 #[derive(Resource)]
-struct TracerArt {
-    mesh: Handle<Mesh>,
-    mat: Handle<StandardMaterial>,
+struct ProjArt {
+    bullet_mesh: Handle<Mesh>,
+    bullet_mat: Handle<StandardMaterial>,
+    shell_mesh: Handle<Mesh>,
+    shell_mat: Handle<StandardMaterial>,
+    flash_mesh: Handle<Mesh>,   // muzzle flash / spark (small sphere)
+    flash_mat: Handle<StandardMaterial>,
+    boom_mesh: Handle<Mesh>,    // unit sphere, scaled per explosion
+    smoke_mesh: Handle<Mesh>,
+    smoke_mat: Handle<StandardMaterial>,
+    debris_mesh: Handle<Mesh>,
+    debris_mat: Handle<StandardMaterial>,
 }
 
 /// Screen-space start of a left-drag selection box.
@@ -521,9 +562,12 @@ fn main() {
                 order_input,
                 ai_command,
                 combat_fire,
+                projectile_flight,
                 movement,
                 death_cleanup,
-                tracer_cleanup,
+                explosion_update,
+                debris_update,
+                ephemeral_cleanup,
                 hud_update,
             ),
         )
@@ -642,15 +686,39 @@ fn setup_world(
             ..default()
         }),
     });
-    // Tracer art (unit-length beam, scaled to each shot).
-    commands.insert_resource(TracerArt {
-        mesh: meshes.add(Cuboid::new(0.06, 0.06, 1.0)),
-        mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.4),
-            emissive: LinearRgba::rgb(1.4, 1.0, 0.35),
+    // Projectile / explosion art.
+    commands.insert_resource(ProjArt {
+        // Short, bright tracer streak (points along +Z, its travel direction).
+        bullet_mesh: meshes.add(Cuboid::new(0.05, 0.05, 0.7)),
+        bullet_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.86, 0.45),
+            emissive: LinearRgba::rgb(2.6, 1.7, 0.5),
             unlit: true,
             ..default()
         }),
+        shell_mesh: meshes.add(Sphere::new(0.16)),
+        shell_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.08, 0.08, 0.08),
+            perceptual_roughness: 0.7,
+            ..default()
+        }),
+        flash_mesh: meshes.add(Sphere::new(0.28)),
+        flash_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.9, 0.55),
+            emissive: LinearRgba::rgb(3.0, 2.2, 0.8),
+            unlit: true,
+            ..default()
+        }),
+        boom_mesh: meshes.add(Sphere::new(1.0)),
+        smoke_mesh: meshes.add(Sphere::new(1.0)),
+        smoke_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.20, 0.19, 0.17, 0.55),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        }),
+        debris_mesh: meshes.add(Cuboid::new(0.16, 0.16, 0.16)),
+        debris_mat: materials.add(matte(Color::srgb(0.16, 0.14, 0.10))),
     });
 
     // Trenches are always dug for both sides.
@@ -1350,10 +1418,19 @@ fn ai_command(
 
 /// Units auto-fire at the nearest enemy within weapon range, spawning a tracer
 /// and dealing damage.
+struct Shot {
+    from: Vec3,
+    to: Vec3,
+    target: Entity,
+    dmg: f32,
+    arty: bool,
+    faction: Faction,
+}
+
 fn combat_fire(
     time: Res<Time>,
     mut commands: Commands,
-    tracer: Res<TracerArt>,
+    art: Res<ProjArt>,
     positions: Query<(Entity, &GlobalTransform, &Unit)>,
     mut shooters: Query<(&GlobalTransform, &Unit, &mut Fighter)>,
     mut healths: Query<&mut Health>,
@@ -1364,7 +1441,7 @@ fn combat_fire(
         .map(|(e, gt, u)| (e, gt.translation(), u.faction))
         .collect();
 
-    let mut shots: Vec<(Vec3, Vec3, Entity, f32)> = Vec::new();
+    let mut shots: Vec<Shot> = Vec::new();
     for (gt, u, mut f) in &mut shooters {
         f.cooldown.tick(dt);
         if f.range <= 0.0 || !f.cooldown.is_finished() {
@@ -1385,37 +1462,188 @@ fn combat_fire(
         }
         if let Some((te, tp)) = best {
             f.cooldown.reset();
-            shots.push((p, tp, te, f.damage));
+            shots.push(Shot {
+                from: p,
+                to: tp,
+                target: te,
+                dmg: f.damage,
+                arty: matches!(u.kind, UnitType::Artillery),
+                faction: u.faction,
+            });
         }
     }
 
-    for (from, to, te, dmg) in shots {
-        if let Ok(mut h) = healths.get_mut(te) {
-            h.hp -= dmg;
+    for s in shots {
+        let muzzle = s.from + Vec3::Y * 0.95;
+        spawn_flash(&mut commands, &art, muzzle, if s.arty { 0.10 } else { 0.05 });
+
+        if s.arty {
+            // Arcing shell; damage is dealt as area effect on impact.
+            let ground = Vec3::new(s.to.x, 0.0, s.to.z);
+            let dist = xz_dist(muzzle, ground);
+            commands.spawn((
+                Mesh3d(art.shell_mesh.clone()),
+                MeshMaterial3d(art.shell_mat.clone()),
+                Transform::from_translation(muzzle),
+                Projectile {
+                    from: muzzle,
+                    to: ground,
+                    t: 0.0,
+                    dur: (dist / 34.0).clamp(0.6, 1.9),
+                    arc: (dist * 0.32).clamp(5.0, 16.0),
+                    shell: true,
+                    damage: s.dmg,
+                    radius: 4.5,
+                    faction: s.faction,
+                },
+            ));
+        } else {
+            // Bullet: hitscan damage now, fast tracer streak for the eye.
+            if let Ok(mut h) = healths.get_mut(s.target) {
+                h.hp -= s.dmg;
+            }
+            let b = s.to + Vec3::Y * 0.9;
+            let dist = (b - muzzle).length();
+            commands.spawn((
+                Mesh3d(art.bullet_mesh.clone()),
+                MeshMaterial3d(art.bullet_mat.clone()),
+                Transform::from_translation(muzzle),
+                Projectile {
+                    from: muzzle,
+                    to: b,
+                    t: 0.0,
+                    dur: (dist / 95.0).clamp(0.04, 0.34),
+                    arc: 0.0,
+                    shell: false,
+                    damage: 0.0,
+                    radius: 0.0,
+                    faction: s.faction,
+                },
+            ));
         }
-        spawn_tracer(&mut commands, &tracer, from, to);
     }
 }
 
-fn spawn_tracer(commands: &mut Commands, tracer: &TracerArt, from: Vec3, to: Vec3) {
-    let a = from + Vec3::Y * 0.9;
-    let b = to + Vec3::Y * 0.9;
-    let dir = b - a;
-    let len = dir.length();
-    if len < 0.05 {
-        return;
-    }
-    let mut t = Transform::from_translation((a + b) * 0.5)
-        .with_rotation(Quat::from_rotation_arc(Vec3::Z, dir / len));
-    t.scale.z = len;
+fn spawn_flash(commands: &mut Commands, art: &ProjArt, pos: Vec3, life: f32) {
     commands.spawn((
-        Mesh3d(tracer.mesh.clone()),
-        MeshMaterial3d(tracer.mat.clone()),
-        t,
-        Tracer {
-            life: Timer::from_seconds(0.12, TimerMode::Once),
+        Mesh3d(art.flash_mesh.clone()),
+        MeshMaterial3d(art.flash_mat.clone()),
+        Transform::from_translation(pos),
+        Ephemeral {
+            life: Timer::from_seconds(life, TimerMode::Once),
         },
     ));
+}
+
+/// Advance projectiles along their path (straight for bullets, parabolic for
+/// shells); on arrival, bullets spark and shells explode with area damage.
+fn projectile_flight(
+    time: Res<Time>,
+    mut commands: Commands,
+    art: Res<ProjArt>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut proj: Query<(Entity, &mut Transform, &mut Projectile)>,
+    units: Query<(Entity, &GlobalTransform, &Unit)>,
+    mut healths: Query<&mut Health>,
+) {
+    let dt = time.delta_secs();
+    let snap: Vec<(Entity, Vec3, Faction)> = units
+        .iter()
+        .map(|(e, gt, u)| (e, gt.translation(), u.faction))
+        .collect();
+
+    for (e, mut tf, mut p) in &mut proj {
+        p.t += dt;
+        let frac = (p.t / p.dur).min(1.0);
+        let point = |f: f32| p.from.lerp(p.to, f) + Vec3::Y * (p.arc * 4.0 * f * (1.0 - f));
+        let pos = point(frac);
+        let ahead = point((frac + 0.03).min(1.0)) - pos;
+        if ahead.length_squared() > 1e-6 {
+            tf.rotation = Quat::from_rotation_arc(Vec3::Z, ahead.normalize());
+        }
+        tf.translation = pos;
+
+        if frac >= 1.0 {
+            if p.shell {
+                spawn_explosion(&mut commands, &art, &mut materials, p.to);
+                for (te, tp, tfac) in &snap {
+                    if *tfac == p.faction {
+                        continue;
+                    }
+                    let d = xz_dist(*tp, p.to);
+                    if d < p.radius {
+                        if let Ok(mut h) = healths.get_mut(*te) {
+                            h.hp -= p.damage * (1.0 - d / p.radius);
+                        }
+                    }
+                }
+            } else {
+                spawn_flash(&mut commands, &art, pos, 0.04);
+            }
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Spawn an explosion: an expanding fading flash, a smoke puff, and debris.
+fn spawn_explosion(
+    commands: &mut Commands,
+    art: &ProjArt,
+    materials: &mut Assets<StandardMaterial>,
+    at: Vec3,
+) {
+    // Flash owns a fresh material so it can fade independently.
+    let flash_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.7, 0.3, 1.0),
+        emissive: LinearRgba::rgb(4.0, 2.2, 0.7),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(art.boom_mesh.clone()),
+        MeshMaterial3d(flash_mat.clone()),
+        Transform::from_translation(at + Vec3::Y * 0.6).with_scale(Vec3::splat(0.4)),
+        Explosion {
+            life: Timer::from_seconds(0.45, TimerMode::Once),
+            max_scale: 3.4,
+            mat: flash_mat,
+        },
+    ));
+    // Lingering smoke.
+    let smoke_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.22, 0.20, 0.18, 0.6),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(art.smoke_mesh.clone()),
+        MeshMaterial3d(smoke_mat.clone()),
+        Transform::from_translation(at + Vec3::Y * 1.2).with_scale(Vec3::splat(1.2)),
+        Explosion {
+            life: Timer::from_seconds(1.3, TimerMode::Once),
+            max_scale: 3.0,
+            mat: smoke_mat,
+        },
+    ));
+    // Debris chunks flung outward on deterministic-ish angles.
+    for i in 0..9 {
+        let a = i as f32 * 0.698 + at.x * 0.3;
+        let up = 7.0 + (i as f32 * 1.7).sin().abs() * 6.0;
+        let out = 4.0 + (i as f32 * 0.9).cos().abs() * 4.0;
+        let vel = Vec3::new(a.cos() * out, up, a.sin() * out);
+        commands.spawn((
+            Mesh3d(art.debris_mesh.clone()),
+            MeshMaterial3d(art.debris_mat.clone()),
+            Transform::from_translation(at + Vec3::Y * 0.4),
+            Debris {
+                vel,
+                spin: Vec3::new(a.sin() * 9.0, a.cos() * 7.0, a * 3.0),
+                life: Timer::from_seconds(1.4, TimerMode::Once),
+            },
+        ));
+    }
 }
 
 /// Move each unit toward its order goal, separating so none overlap, and face
@@ -1509,14 +1737,64 @@ fn death_cleanup(
     }
 }
 
-/// Fade out and remove spent tracers.
-fn tracer_cleanup(
+/// Grow and fade explosion flashes / smoke, then remove them.
+fn explosion_update(
     time: Res<Time>,
     mut commands: Commands,
-    mut q: Query<(Entity, &mut Tracer)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &mut Transform, &mut Explosion)>,
 ) {
-    for (e, mut t) in &mut q {
-        if t.life.tick(time.delta()).is_finished() {
+    let dt = time.delta();
+    for (e, mut tf, mut ex) in &mut q {
+        ex.life.tick(dt);
+        let f = ex.life.fraction();
+        // Ease-out growth; fade alpha and emissive toward the end.
+        let scale = ex.max_scale * (1.0 - (1.0 - f).powi(2)).max(0.05);
+        tf.scale = Vec3::splat(scale.max(0.05));
+        if let Some(mut m) = materials.get_mut(&ex.mat) {
+            let a = (1.0 - f).clamp(0.0, 1.0);
+            let base = m.base_color.to_srgba();
+            m.base_color = Color::srgba(base.red, base.green, base.blue, base.alpha.max(0.6) * a);
+            let em = m.emissive;
+            m.emissive = LinearRgba::rgb(em.red * a, em.green * a, em.blue * a);
+        }
+        if ex.life.is_finished() {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Ballistic debris chunks under gravity, tumbling, settling on the ground.
+fn debris_update(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Transform, &mut Debris)>,
+) {
+    let dt = time.delta_secs();
+    for (e, mut tf, mut d) in &mut q {
+        d.vel.y -= 24.0 * dt;
+        let vel = d.vel;
+        tf.translation += vel * dt;
+        if tf.translation.y < 0.1 {
+            tf.translation.y = 0.1;
+            d.vel = Vec3::ZERO; // settled
+        }
+        let spin = d.spin * dt;
+        tf.rotate(Quat::from_euler(EulerRot::XYZ, spin.x, spin.y, spin.z));
+        if d.life.tick(time.delta()).is_finished() {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Remove short-lived effects (muzzle flashes, sparks).
+fn ephemeral_cleanup(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Ephemeral)>,
+) {
+    for (e, mut x) in &mut q {
+        if x.life.tick(time.delta()).is_finished() {
             commands.entity(e).despawn();
         }
     }

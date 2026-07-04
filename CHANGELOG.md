@@ -3,6 +3,17 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.8.0
+
+- **Combat visuals overhauled.** Small-arms fire is now fast, bright **tracer
+  rounds** with muzzle flashes instead of solid laser beams.
+- **Artillery arcs and explodes.** Shells travel on a ballistic arc to their
+  target and burst on impact with an expanding fireball, drifting smoke, thrown
+  debris, and **area damage** — no more instant laser hits.
+- **Loading screen**: the deploy/loading page now keeps its text on screen with
+  an animated spinner until the WebAssembly has actually finished loading (no
+  premature timeout).
+
 ## v0.7.0
 
 - **The battle is now live and commandable (real-time strategy).** You command
