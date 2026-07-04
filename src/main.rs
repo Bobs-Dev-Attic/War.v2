@@ -167,6 +167,69 @@ impl Weather {
     }
 }
 
+/// A unit the player placed on the Deploy mini-map.
+struct Placed {
+    faction: Faction,
+    kind: UnitType,
+    x: f32,
+    z: f32,
+}
+
+/// All player-placed units (empty → fall back to the auto-garrison).
+#[derive(Resource, Default)]
+struct Deployment(Vec<Placed>);
+
+impl UnitType {
+    fn parse(code: &str) -> Option<Self> {
+        Some(match code {
+            "inf" => UnitType::Infantry,
+            "sni" => UnitType::Sniper,
+            "mg" => UnitType::MachineGunner,
+            "art" => UnitType::Artillery,
+            "run" => UnitType::Runner,
+            "sco" => UnitType::Scout,
+            _ => return None,
+        })
+    }
+}
+
+/// Parse the compact `side:type:x:z,...` placement string from the setup page.
+fn read_deployment() -> Deployment {
+    let raw: String = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            read_global("__WAR_UNITS").unwrap_or_default()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            String::new()
+        }
+    };
+
+    let mut out = Vec::new();
+    for tok in raw.split(',').filter(|s| !s.is_empty()) {
+        let mut it = tok.split(':');
+        let (Some(side), Some(ty), Some(xs), Some(zs)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        let faction = match side {
+            "c" => Faction::Central,
+            _ => Faction::British,
+        };
+        let (Some(kind), Ok(x), Ok(z)) = (
+            UnitType::parse(ty),
+            xs.parse::<f32>(),
+            zs.parse::<f32>(),
+        ) else {
+            continue;
+        };
+        out.push(Placed { faction, kind, x, z });
+    }
+    Deployment(out)
+}
+
 /// Read the setup config the HTML page stashed on `window` before booting us.
 fn read_setup() -> Setup {
     #[cfg(target_arch = "wasm32")]
@@ -348,6 +411,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .insert_resource(read_setup())
+        .insert_resource(read_deployment())
         .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72)))
         .insert_resource(CameraFocus(Vec3::ZERO))
         .insert_resource(Rng(0x1234_5678))
@@ -364,6 +428,7 @@ fn setup_world(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut rng: ResMut<Rng>,
     setup: Res<Setup>,
+    deployment: Res<Deployment>,
 ) {
     let weather = setup.weather;
     let (ground_col, nomans_col, crater_col, crater_n) = setup.location.palette();
@@ -454,14 +519,46 @@ fn setup_world(
         duckboard: materials.add(matte(Color::srgb(0.13, 0.11, 0.08))),
     };
 
+    let fmats_b = make_fmats(&mut materials, Faction::British);
+    let fmats_c = make_fmats(&mut materials, Faction::Central);
+
+    // Trenches are always dug for both sides.
     for faction in [Faction::British, Faction::Central] {
-        let fmats = FactionMats {
-            uniform: materials.add(matte(faction.uniform())),
-            helmet: materials.add(matte(faction.helmet())),
-            cap: materials.add(matte(Color::srgb(0.34, 0.31, 0.20))),
-        };
         spawn_trench(&mut commands, &art, &shared, &mut rng, faction);
-        garrison(&mut commands, &art, &shared, &fmats, &mut rng, faction);
+    }
+
+    if deployment.0.is_empty() {
+        // No mini-map placements: fall back to the auto-garrison.
+        garrison(&mut commands, &art, &shared, &fmats_b, &mut rng, Faction::British);
+        garrison(&mut commands, &art, &shared, &fmats_c, &mut rng, Faction::Central);
+    } else {
+        // Build exactly what the player placed on the Deploy mini-map.
+        for p in &deployment.0 {
+            let fm = match p.faction {
+                Faction::British => &fmats_b,
+                Faction::Central => &fmats_c,
+            };
+            let facing =
+                Quat::from_rotation_arc(Vec3::Z, Vec3::new(0.0, 0.0, p.faction.front()));
+            spawn_unit(
+                &mut commands,
+                &art,
+                &shared,
+                fm,
+                p.faction,
+                p.kind,
+                Vec3::new(p.x, 0.0, p.z),
+                facing,
+            );
+        }
+    }
+}
+
+fn make_fmats(materials: &mut Assets<StandardMaterial>, faction: Faction) -> FactionMats {
+    FactionMats {
+        uniform: materials.add(matte(faction.uniform())),
+        helmet: materials.add(matte(faction.helmet())),
+        cap: materials.add(matte(Color::srgb(0.34, 0.31, 0.20))),
     }
 }
 
