@@ -1,83 +1,85 @@
-//! War.v2 — a small grid-based tank skirmish, written in Bevy and compiled to
-//! WebAssembly for the browser.
+//! War.v2 — an isometric 3D WWI real-time strategy sim, written in Bevy and
+//! compiled to WebAssembly.
 //!
-//! Core rule: **no two vehicles may occupy the same cell.** The player tank
-//! (green) moves one cell at a time with the arrow keys / WASD; the enemy
-//! tanks wander on their own. Every move — player or AI — is rejected if the
-//! target cell is off the board or already occupied by another vehicle.
+//! This is the v0.3.0 foundation: an orthographic isometric camera over a
+//! low-poly battlefield, with two armies of low-poly tanks — the British
+//! (khaki) and the Central Powers / Ottoman-German (field-grey) — advancing on
+//! no-man's-land. Units separate so they never overlap, giving the massed
+//! formations a jostling, chaotic feel ahead of real rigid-body physics
+//! (planned for v0.4.0).
 //!
-//! It exercises the real Bevy render loop, sprites, parent/child transforms,
-//! keyboard input, timers and per-frame movement, all running as static wasm.
+//! Controls: WASD / arrow keys pan the camera across the battlefield.
 
 use bevy::color::palettes::css;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
+use bevy::camera::ScalingMode;
 
-// ---- Board geometry -------------------------------------------------------
+// ---- Battlefield geometry -------------------------------------------------
 
-const GRID_W: i32 = 12;
-const GRID_H: i32 = 8;
-const CELL: f32 = 64.0;
-const TANK_SIZE: f32 = 46.0;
+const FIELD_X: f32 = 34.0; // half-width  (east/west)
+const FIELD_Z: f32 = 46.0; // half-depth  (north/south)
+const UNIT_RADIUS: f32 = 1.6; // separation radius (no overlap)
+const ROWS: i32 = 4;
+const COLS: i32 = 8;
 
-/// Convert a logical grid cell to a world-space position (board centered on 0).
-fn cell_to_world(cell: IVec2) -> Vec3 {
-    let x = (cell.x as f32 - (GRID_W as f32 - 1.0) * 0.5) * CELL;
-    let y = (cell.y as f32 - (GRID_H as f32 - 1.0) * 0.5) * CELL;
-    Vec3::new(x, y, 1.0)
+/// The two belligerents. The player will command one of these in a later
+/// version; for now both advance under their own steam.
+#[derive(Clone, Copy, PartialEq)]
+enum Faction {
+    /// British Empire — advancing from the south (−Z) toward the line.
+    British,
+    /// Central Powers (Ottoman / German) — advancing from the north (+Z).
+    Central,
 }
 
-fn in_bounds(cell: IVec2) -> bool {
-    cell.x >= 0 && cell.x < GRID_W && cell.y >= 0 && cell.y < GRID_H
+impl Faction {
+    fn color(self) -> Srgba {
+        match self {
+            Faction::British => Srgba::new(0.62, 0.56, 0.36, 1.0), // khaki
+            Faction::Central => Srgba::new(0.36, 0.40, 0.34, 1.0), // field-grey
+        }
+    }
+    /// The direction this faction advances (world +Z or −Z).
+    fn advance(self) -> Vec3 {
+        match self {
+            Faction::British => Vec3::Z,
+            Faction::Central => Vec3::NEG_Z,
+        }
+    }
 }
 
-// ---- Components & resources ----------------------------------------------
-
-/// Any tank / vehicle on the board. `cell` is its logical position; the visual
-/// transform smoothly follows it. `facing` points the barrel.
+/// A vehicle on the field. `speed` is its forward march rate; separation from
+/// neighbours is applied on top so vehicles never occupy the same space.
 #[derive(Component)]
-struct Vehicle {
-    cell: IVec2,
-    facing: IVec2,
+struct Unit {
+    faction: Faction,
+    speed: f32,
 }
 
-/// Marks the human-controlled tank.
-#[derive(Component)]
-struct Player;
+/// Camera focus point on the ground; the iso camera is a fixed offset from it.
+#[derive(Resource)]
+struct CameraFocus(Vec3);
 
-/// Marks an AI tank and holds its "think" timer.
-#[derive(Component)]
-struct Enemy {
-    timer: Timer,
-}
-
-/// Tiny deterministic RNG so we don't need an external crate (and stay
-/// reproducible for `Date.now`-free wasm builds).
+/// Tiny deterministic RNG (no external crate, reproducible for wasm).
 #[derive(Resource)]
 struct Rng(u32);
-
 impl Rng {
-    fn next_u32(&mut self) -> u32 {
-        // xorshift32
+    fn f32(&mut self) -> f32 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.0 = x;
-        x
+        (x >> 8) as f32 / (1u32 << 24) as f32 // 0..1
     }
-    /// One of the four cardinal directions.
-    fn dir(&mut self) -> IVec2 {
-        match self.next_u32() % 4 {
-            0 => IVec2::new(1, 0),
-            1 => IVec2::new(-1, 0),
-            2 => IVec2::new(0, 1),
-            _ => IVec2::new(0, -1),
-        }
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * self.f32()
     }
 }
 
-// ---- App ------------------------------------------------------------------
+// Isometric camera: a fixed offset direction from the focus, orthographic.
+const ISO_DIR: Vec3 = Vec3::new(1.0, 1.15, 1.0);
+const CAM_DIST: f32 = 90.0;
 
 fn main() {
     #[cfg(target_arch = "wasm32")]
@@ -88,7 +90,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "War.v2 — tank skirmish (Bevy + WebAssembly)".into(),
+                        title: "War.v2 — WWI (Bevy + WebAssembly)".into(),
                         canvas: Some("#bevy-canvas".into()),
                         fit_canvas_to_parent: true,
                         prevent_default_event_handling: false,
@@ -98,235 +100,319 @@ fn main() {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
-        .insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.12)))
-        .insert_resource(Rng(0x9e37_79b9))
-        .add_systems(Startup, setup)
-        // Player and AI movement are chained so occupancy stays consistent
-        // within a frame (no two vehicles claim the same cell at once).
-        .add_systems(Update, (player_move, enemy_move, follow_cell).chain())
+        .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72))) // hazy sky
+        .insert_resource(CameraFocus(Vec3::ZERO))
+        .insert_resource(Rng(0x1234_5678))
+        .add_systems(Startup, (setup_world, setup_ui))
+        .add_systems(Update, (advance_units, pan_camera).chain())
         .run();
 }
 
-fn setup(mut commands: Commands) {
-    // A 2D camera with tonemapping off — the trimmed render feature set does
-    // not ship the tonemapping LUT, and leaving it on hides all sprites.
-    commands.spawn((Camera2d, Tonemapping::None, Msaa::Off));
+// ---- World setup ----------------------------------------------------------
 
-    draw_board(&mut commands);
-
-    // Titles / instructions in world space above the board.
-    let board_top = (GRID_H as f32 * CELL) * 0.5;
+fn setup_world(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut rng: ResMut<Rng>,
+) {
+    // Isometric orthographic camera, with a camera-attached ambient light.
     commands.spawn((
-        Text2d::new("War.v2  -  tank skirmish"),
-        TextFont {
-            font_size: FontSize::Px(28.0),
+        Camera3d::default(),
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: 60.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_translation(ISO_DIR.normalize() * CAM_DIST).looking_at(Vec3::ZERO, Vec3::Y),
+        AmbientLight {
+            color: Color::srgb(0.85, 0.86, 0.90),
+            brightness: 320.0,
             ..default()
         },
-        TextColor(Color::WHITE),
-        Transform::from_xyz(0.0, board_top + 44.0, 10.0),
     ));
+
+    // Sun: a directional light with shadows for the low-poly look.
     commands.spawn((
-        Text2d::new("arrow keys / WASD to move   -   no two vehicles share a cell"),
-        TextFont {
-            font_size: FontSize::Px(17.0),
+        DirectionalLight {
+            illuminance: 9000.0,
+            shadow_maps_enabled: true,
             ..default()
         },
-        TextColor(Color::srgb(0.62, 0.72, 0.88)),
-        Transform::from_xyz(0.0, board_top + 18.0, 10.0),
+        Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Version badge, wired to the crate version so it never drifts from Cargo.toml.
-    let board_bottom = -(GRID_H as f32 * CELL) * 0.5;
+    // Ground: a big matte mud slab.
+    let ground = meshes.add(Cuboid::new(FIELD_X * 2.0 + 8.0, 1.0, FIELD_Z * 2.0 + 8.0));
+    let ground_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.26, 0.19),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
     commands.spawn((
-        Text2d::new(concat!("v", env!("CARGO_PKG_VERSION"))),
-        TextFont {
-            font_size: FontSize::Px(15.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.45, 0.55, 0.70)),
-        Transform::from_xyz(0.0, board_bottom - 22.0, 10.0),
+        Mesh3d(ground),
+        MeshMaterial3d(ground_mat),
+        Transform::from_xyz(0.0, -0.5, 0.0),
     ));
 
-    // The player tank.
-    spawn_tank(&mut commands, IVec2::new(1, 1), css::LIMEGREEN, true);
+    // No-man's-land: a darker churned strip through the middle.
+    let strip = meshes.add(Cuboid::new(FIELD_X * 2.0, 0.06, 10.0));
+    let strip_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.17, 0.15, 0.12),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(strip),
+        MeshMaterial3d(strip_mat),
+        Transform::from_xyz(0.0, 0.03, 0.0),
+    ));
 
-    // A handful of enemy tanks at fixed starting cells.
-    let enemies = [
-        IVec2::new(10, 6),
-        IVec2::new(10, 1),
-        IVec2::new(1, 6),
-        IVec2::new(6, 3),
-        IVec2::new(8, 4),
-    ];
-    for (i, cell) in enemies.iter().enumerate() {
-        let color = if i % 2 == 0 { css::CRIMSON } else { css::ORANGE };
-        spawn_tank(&mut commands, *cell, color, false);
+    // Scatter low-poly craters / rubble for texture.
+    let rubble_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.20, 0.18, 0.14),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    for _ in 0..60 {
+        let s = rng.range(0.6, 2.2);
+        let x = rng.range(-FIELD_X, FIELD_X);
+        let z = rng.range(-FIELD_Z, FIELD_Z);
+        let mesh = meshes.add(Cuboid::new(s, rng.range(0.15, 0.5), s));
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(rubble_mat.clone()),
+            Transform::from_xyz(x, 0.05, z)
+                .with_rotation(Quat::from_rotation_y(rng.range(0.0, 6.28))),
+        ));
     }
+
+    // Deploy the two armies in loose formation on opposite ends.
+    spawn_army(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut rng,
+        Faction::British,
+        -FIELD_Z + 6.0,
+    );
+    spawn_army(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut rng,
+        Faction::Central,
+        FIELD_Z - 6.0,
+    );
 }
 
-/// Draw the board background and grid lines out of simple sprites.
-fn draw_board(commands: &mut Commands) {
-    let board_w = GRID_W as f32 * CELL;
-    let board_h = GRID_H as f32 * CELL;
-
-    // Felt-green playfield.
-    commands.spawn((
-        Sprite {
-            color: Color::srgb(0.12, 0.18, 0.15),
-            custom_size: Some(Vec2::new(board_w, board_h)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 0.0),
-    ));
-
-    let line = Color::srgba(1.0, 1.0, 1.0, 0.06);
-    // Vertical grid lines.
-    for i in 0..=GRID_W {
-        let x = (i as f32 - GRID_W as f32 * 0.5) * CELL;
-        commands.spawn((
-            Sprite {
-                color: line,
-                custom_size: Some(Vec2::new(2.0, board_h)),
-                ..default()
-            },
-            Transform::from_xyz(x, 0.0, 0.5),
-        ));
-    }
-    // Horizontal grid lines.
-    for j in 0..=GRID_H {
-        let y = (j as f32 - GRID_H as f32 * 0.5) * CELL;
-        commands.spawn((
-            Sprite {
-                color: line,
-                custom_size: Some(Vec2::new(board_w, 2.0)),
-                ..default()
-            },
-            Transform::from_xyz(0.0, y, 0.5),
-        ));
-    }
-}
-
-/// Spawn a tank: a body sprite with a barrel child so it visibly aims.
-fn spawn_tank(commands: &mut Commands, cell: IVec2, color: Srgba, is_player: bool) {
-    let facing = IVec2::new(0, 1);
-    let mut tank = commands.spawn((
-        Sprite {
-            color: color.into(),
-            custom_size: Some(Vec2::splat(TANK_SIZE)),
-            ..default()
-        },
-        Transform::from_translation(cell_to_world(cell)),
-        Vehicle { cell, facing },
-    ));
-
-    // Barrel: a thin light rectangle extending "up" in local space, so
-    // rotating the tank aims it along `facing`.
-    tank.with_children(|parent| {
-        parent.spawn((
-            Sprite {
-                color: Color::srgb(0.9, 0.9, 0.9),
-                custom_size: Some(Vec2::new(7.0, TANK_SIZE * 0.75)),
-                ..default()
-            },
-            Transform::from_xyz(0.0, TANK_SIZE * 0.45, 0.1),
-        ));
+/// Spawn one faction's formation at `base_z`, facing the centre line.
+fn spawn_army(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    rng: &mut Rng,
+    faction: Faction,
+    base_z: f32,
+) {
+    // Shared low-poly tank meshes (built once, instanced per unit).
+    let hull = meshes.add(Cuboid::new(2.2, 0.9, 3.2));
+    let turret = meshes.add(Cuboid::new(1.4, 0.7, 1.4));
+    let barrel = meshes.add(Cuboid::new(0.22, 0.22, 2.0));
+    let body_mat = materials.add(StandardMaterial {
+        base_color: faction.color().into(),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let metal_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.10, 0.10, 0.10),
+        perceptual_roughness: 0.6,
+        ..default()
     });
 
-    if is_player {
-        tank.insert(Player);
-    } else {
-        tank.insert(Enemy {
-            timer: Timer::from_seconds(0.6, TimerMode::Repeating),
+    let advance = faction.advance();
+    let facing = Quat::from_rotation_arc(Vec3::Z, advance);
+
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            let x = (col as f32 - (COLS as f32 - 1.0) * 0.5) * 5.0 + rng.range(-0.8, 0.8);
+            let z = base_z - advance.z * (row as f32 * 4.5) + rng.range(-0.8, 0.8);
+
+            commands
+                .spawn((
+                    Transform::from_xyz(x, 0.45, z).with_rotation(facing),
+                    Visibility::default(),
+                    Unit {
+                        faction,
+                        speed: rng.range(1.4, 2.4),
+                    },
+                ))
+                .with_children(|t| {
+                    t.spawn((
+                        Mesh3d(hull.clone()),
+                        MeshMaterial3d(body_mat.clone()),
+                        Transform::default(),
+                    ));
+                    t.spawn((
+                        Mesh3d(turret.clone()),
+                        MeshMaterial3d(body_mat.clone()),
+                        Transform::from_xyz(0.0, 0.7, -0.2),
+                    ));
+                    t.spawn((
+                        Mesh3d(barrel.clone()),
+                        MeshMaterial3d(metal_mat.clone()),
+                        Transform::from_xyz(0.0, 0.75, 1.0),
+                    ));
+                });
+        }
+    }
+}
+
+// ---- UI overlay -----------------------------------------------------------
+
+fn setup_ui(mut commands: Commands) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(14.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            ..default()
+        })
+        .with_children(|p| {
+            p.spawn((
+                Text::new("War.v2  -  WWI Western Front"),
+                TextFont {
+                    font_size: FontSize::Px(26.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.12, 0.12, 0.12)),
+            ));
+            p.spawn((
+                Text::new("British (khaki)  vs  Central Powers (field-grey)"),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.20, 0.20, 0.20)),
+            ));
+            p.spawn((
+                Text::new("WASD / arrows: pan the battlefield"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.25, 0.25, 0.25)),
+            ));
         });
-    }
+
+    // Version badge, bottom-right, wired to the crate version.
+    commands.spawn((
+        Text::new(concat!("v", env!("CARGO_PKG_VERSION"))),
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.15, 0.15, 0.15)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(10.0),
+            right: Val::Px(12.0),
+            ..default()
+        },
+    ));
 }
 
-// ---- Movement -------------------------------------------------------------
+// ---- Simulation -----------------------------------------------------------
 
-/// Return true if `cell` is on the board and not held by any vehicle other
-/// than `mover`.
-fn cell_free(cell: IVec2, mover: Entity, occ: &[(Entity, IVec2)]) -> bool {
-    in_bounds(cell) && !occ.iter().any(|(e, c)| *e != mover && *c == cell)
-}
-
-/// Player tank: one cell per key press; blocked by edges and other vehicles.
-///
-/// The read query excludes the player (`Without<Player>`) so it stays disjoint
-/// from the mutable player query; the player's own cell is irrelevant to the
-/// occupancy test anyway (`cell_free` ignores the mover).
-fn player_move(
-    keys: Res<ButtonInput<KeyCode>>,
-    others: Query<(Entity, &Vehicle), Without<Player>>,
-    mut player: Query<(Entity, &mut Vehicle), With<Player>>,
-) {
-    let dir = if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
-        IVec2::new(0, 1)
-    } else if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
-        IVec2::new(0, -1)
-    } else if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
-        IVec2::new(-1, 0)
-    } else if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::KeyD) {
-        IVec2::new(1, 0)
-    } else {
-        return;
-    };
-
-    let occ: Vec<(Entity, IVec2)> = others.iter().map(|(e, v)| (e, v.cell)).collect();
-    if let Ok((entity, mut vehicle)) = player.single_mut() {
-        vehicle.facing = dir; // always turn to face, even if blocked
-        let target = vehicle.cell + dir;
-        if cell_free(target, entity, &occ) {
-            vehicle.cell = target;
-        }
-    }
-}
-
-/// Enemy tanks: each ticks a timer, then tries a random cardinal step, obeying
-/// the same occupancy rule. Occupancy is updated as we go so two enemies never
-/// step onto the same cell in one frame.
-///
-/// A `ParamSet` lets us read every vehicle's cell (including the player) and
-/// then mutate the enemies without the two queries conflicting.
-fn enemy_move(
-    time: Res<Time>,
-    mut rng: ResMut<Rng>,
-    mut set: ParamSet<(
-        Query<(Entity, &Vehicle)>,
-        Query<(Entity, &mut Vehicle, &mut Enemy)>,
-    )>,
-) {
-    let mut occ: Vec<(Entity, IVec2)> = set.p0().iter().map(|(e, v)| (e, v.cell)).collect();
-
-    for (entity, mut vehicle, mut enemy) in &mut set.p1() {
-        if !enemy.timer.tick(time.delta()).just_finished() {
-            continue;
-        }
-        let dir = rng.dir();
-        vehicle.facing = dir;
-        let target = vehicle.cell + dir;
-        if cell_free(target, entity, &occ) {
-            // Update both the component and our local occupancy snapshot.
-            if let Some(slot) = occ.iter_mut().find(|(e, _)| *e == entity) {
-                slot.1 = target;
-            }
-            vehicle.cell = target;
-        }
-    }
-}
-
-/// Smoothly move each tank's transform toward its logical cell and aim it.
-fn follow_cell(time: Res<Time>, mut vehicles: Query<(&Vehicle, &mut Transform)>) {
+/// March every unit forward, then push overlapping units apart so no two
+/// vehicles occupy the same space. Units halt around no-man's-land.
+fn advance_units(time: Res<Time>, mut units: Query<(Entity, &mut Transform, &Unit)>) {
     let dt = time.delta_secs();
-    for (vehicle, mut transform) in &mut vehicles {
-        let target = cell_to_world(vehicle.cell);
-        // Exponential smoothing toward the target cell.
-        let t = 1.0 - (-12.0 * dt).exp();
-        transform.translation = transform.translation.lerp(target, t);
 
-        // Aim: local +Y should point along `facing`.
-        let angle = (vehicle.facing.y as f32).atan2(vehicle.facing.x as f32)
-            - std::f32::consts::FRAC_PI_2;
-        let target_rot = Quat::from_rotation_z(angle);
-        transform.rotation = transform.rotation.slerp(target_rot, t);
+    // Snapshot positions so separation reads a consistent frame.
+    let snapshot: Vec<(Entity, Vec3)> = units
+        .iter()
+        .map(|(e, t, _)| (e, t.translation))
+        .collect();
+
+    for (entity, mut transform, unit) in &mut units {
+        let mut pos = transform.translation;
+        let advance = unit.faction.advance();
+
+        // March forward until the unit nears the centre line, then hold.
+        let dist_to_line = pos.z.abs();
+        if dist_to_line > 6.0 {
+            pos += advance * unit.speed * dt;
+        }
+
+        // Separation: push away from any neighbour within UNIT_RADIUS*2.
+        let mut push = Vec3::ZERO;
+        for (other, opos) in &snapshot {
+            if *other == entity {
+                continue;
+            }
+            let mut d = pos - *opos;
+            d.y = 0.0;
+            let dist = d.length();
+            let min_d = UNIT_RADIUS * 2.0;
+            if dist > 0.0001 && dist < min_d {
+                push += d.normalize() * (min_d - dist);
+            }
+        }
+        pos += push * 0.5;
+
+        // Keep on the field.
+        pos.x = pos.x.clamp(-FIELD_X, FIELD_X);
+        pos.z = pos.z.clamp(-FIELD_Z, FIELD_Z);
+        pos.y = 0.45;
+
+        // Face the direction of travel (advance + jostle).
+        let mut heading = advance + push.normalize_or_zero() * 0.3;
+        heading.y = 0.0;
+        if heading.length() > 0.01 {
+            let yaw = Quat::from_rotation_arc(Vec3::Z, heading.normalize());
+            transform.rotation = transform.rotation.slerp(yaw, 1.0 - (-6.0 * dt).exp());
+        }
+        transform.translation = pos;
     }
 }
+
+/// Pan the isometric camera across the field with WASD / arrow keys.
+fn pan_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut focus: ResMut<CameraFocus>,
+    mut cam: Query<&mut Transform, With<Camera3d>>,
+) {
+    let mut dir = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        dir += Vec3::new(-1.0, 0.0, -1.0);
+    }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        dir += Vec3::new(1.0, 0.0, 1.0);
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        dir += Vec3::new(-1.0, 0.0, 1.0);
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        dir += Vec3::new(1.0, 0.0, -1.0);
+    }
+
+    if dir != Vec3::ZERO {
+        focus.0 += dir.normalize() * 24.0 * time.delta_secs();
+        focus.0.x = focus.0.x.clamp(-FIELD_X, FIELD_X);
+        focus.0.z = focus.0.z.clamp(-FIELD_Z, FIELD_Z);
+    }
+
+    if let Ok(mut transform) = cam.single_mut() {
+        let eye = focus.0 + ISO_DIR.normalize() * CAM_DIST;
+        *transform = Transform::from_translation(eye).looking_at(focus.0, Vec3::Y);
+    }
+}
+
+// Keep a reference to css so the palette import is always available for tuning.
+#[allow(dead_code)]
+const _PALETTE: Srgba = css::KHAKI;

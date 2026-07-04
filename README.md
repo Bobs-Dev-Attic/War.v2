@@ -1,12 +1,19 @@
 # War.v2
 
-A small [Bevy](https://bevyengine.org/) demo compiled to **WebAssembly** and
-hosted on **Vercel** — built to test how well Bevy works as a web target.
+An isometric 3D **WWI real-time strategy** sim, written in
+[Bevy](https://bevyengine.org/), compiled to **WebAssembly**, and hosted on
+**Vercel**.
 
-The scene is a 2D Bevy `App`: floating "cards" drift around and bounce off the
-edges, and clicking deals more cards at the cursor. It exercises the real Bevy
-render loop, sprites, transforms, text, and mouse input, all running in the
-browser.
+The current build (v0.3.0) is the 3D foundation: an orthographic isometric
+camera over a low-poly battlefield, with two armies — the British (khaki) and
+the Central Powers / Ottoman-German (field-grey) — advancing on no-man's-land
+and separating so no two vehicles overlap. Pan the field with WASD / arrow
+keys. The in-game version badge (bottom-right) always matches the deployed
+build.
+
+Roadmap: rigid-body physics (the "chaos and confusion"), RTS unit command,
+playable factions, and RPG systems land in subsequent versions — see
+`CHANGELOG.md`.
 
 ## Why the previous deploy 404'd
 
