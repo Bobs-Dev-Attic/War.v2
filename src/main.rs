@@ -10,7 +10,200 @@
 use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 use bevy::camera::ScalingMode;
+use bevy::pbr::{DistanceFog, FogFalloff};
 use std::f32::consts::FRAC_PI_2;
+
+// ---- Setup config (chosen on the HTML setup page) -------------------------
+
+/// WWI theatre — sets the terrain palette and crater density.
+#[derive(Clone, Copy)]
+enum Location {
+    Somme,
+    Ypres,
+    Gallipoli,
+    Sinai,
+    Verdun,
+}
+
+/// Weather — sets sky, lighting and fog.
+#[derive(Clone, Copy)]
+enum Weather {
+    Clear,
+    Overcast,
+    Rain,
+    Fog,
+    Snow,
+}
+
+#[derive(Resource, Clone, Copy)]
+struct Setup {
+    location: Location,
+    weather: Weather,
+}
+
+impl Location {
+    fn parse(s: &str) -> Self {
+        match s {
+            "ypres" => Location::Ypres,
+            "gallipoli" => Location::Gallipoli,
+            "sinai" => Location::Sinai,
+            "verdun" => Location::Verdun,
+            _ => Location::Somme,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Location::Somme => "The Somme",
+            Location::Ypres => "Ypres / Flanders",
+            Location::Gallipoli => "Gallipoli",
+            Location::Sinai => "Sinai & Palestine",
+            Location::Verdun => "Verdun",
+        }
+    }
+    /// (ground color, no-man's-land color, crater color, crater count)
+    fn palette(self) -> (Color, Color, Color, u32) {
+        match self {
+            Location::Somme => (
+                Color::srgb(0.30, 0.27, 0.19),
+                Color::srgb(0.18, 0.16, 0.12),
+                Color::srgb(0.21, 0.19, 0.14),
+                80,
+            ),
+            Location::Ypres => (
+                Color::srgb(0.24, 0.26, 0.18),
+                Color::srgb(0.15, 0.16, 0.12),
+                Color::srgb(0.17, 0.18, 0.13),
+                95,
+            ),
+            Location::Gallipoli => (
+                Color::srgb(0.50, 0.42, 0.26),
+                Color::srgb(0.40, 0.33, 0.20),
+                Color::srgb(0.44, 0.36, 0.22),
+                45,
+            ),
+            Location::Sinai => (
+                Color::srgb(0.66, 0.56, 0.36),
+                Color::srgb(0.58, 0.48, 0.30),
+                Color::srgb(0.60, 0.50, 0.32),
+                25,
+            ),
+            Location::Verdun => (
+                Color::srgb(0.26, 0.25, 0.18),
+                Color::srgb(0.16, 0.15, 0.11),
+                Color::srgb(0.19, 0.18, 0.13),
+                90,
+            ),
+        }
+    }
+}
+
+impl Weather {
+    fn parse(s: &str) -> Self {
+        match s {
+            "clear" => Weather::Clear,
+            "rain" => Weather::Rain,
+            "fog" => Weather::Fog,
+            "snow" => Weather::Snow,
+            _ => Weather::Overcast,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Weather::Clear => "Clear",
+            Weather::Overcast => "Overcast",
+            Weather::Rain => "Rain",
+            Weather::Fog => "Fog",
+            Weather::Snow => "Snow",
+        }
+    }
+    fn sky(self) -> Color {
+        match self {
+            Weather::Clear => Color::srgb(0.55, 0.68, 0.82),
+            Weather::Overcast => Color::srgb(0.63, 0.66, 0.70),
+            Weather::Rain => Color::srgb(0.42, 0.45, 0.50),
+            Weather::Fog => Color::srgb(0.72, 0.73, 0.74),
+            Weather::Snow => Color::srgb(0.80, 0.83, 0.88),
+        }
+    }
+    /// (ambient color, ambient brightness)
+    fn ambient(self) -> (Color, f32) {
+        match self {
+            Weather::Clear => (Color::srgb(0.85, 0.86, 0.90), 260.0),
+            Weather::Overcast => (Color::srgb(0.82, 0.83, 0.85), 360.0),
+            Weather::Rain => (Color::srgb(0.70, 0.72, 0.76), 320.0),
+            Weather::Fog => (Color::srgb(0.86, 0.86, 0.87), 420.0),
+            Weather::Snow => (Color::srgb(0.90, 0.92, 0.96), 480.0),
+        }
+    }
+    /// (sun illuminance, casts shadows)
+    fn sun(self) -> (f32, bool) {
+        match self {
+            Weather::Clear => (11000.0, true),
+            Weather::Overcast => (4500.0, true),
+            Weather::Rain => (2600.0, false),
+            Weather::Fog => (2200.0, false),
+            Weather::Snow => (6000.0, true),
+        }
+    }
+    /// Optional linear fog: (color, start distance, full-fog distance). Tuned
+    /// for the ~62-unit camera distance so fog reads as depth haze, not a wall.
+    fn fog(self) -> Option<(Color, f32, f32)> {
+        match self {
+            Weather::Clear => None,
+            Weather::Overcast => Some((Color::srgb(0.63, 0.66, 0.70), 72.0, 240.0)),
+            Weather::Rain => Some((Color::srgb(0.45, 0.48, 0.52), 48.0, 150.0)),
+            Weather::Fog => Some((Color::srgb(0.74, 0.75, 0.76), 40.0, 120.0)),
+            Weather::Snow => Some((Color::srgb(0.82, 0.85, 0.90), 55.0, 175.0)),
+        }
+    }
+    /// Ground wetness/darkening multiplier applied to terrain colors.
+    fn wet(self) -> f32 {
+        match self {
+            Weather::Rain => 0.70,
+            Weather::Fog => 0.92,
+            Weather::Snow => 1.15, // snow lightens/covers the ground
+            _ => 1.0,
+        }
+    }
+}
+
+/// Read the setup config the HTML page stashed on `window` before booting us.
+fn read_setup() -> Setup {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let loc = read_global("__WAR_LOCATION").unwrap_or_default();
+        let wx = read_global("__WAR_WEATHER").unwrap_or_default();
+        Setup {
+            location: Location::parse(&loc),
+            weather: Weather::parse(&wx),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Setup {
+            location: Location::Somme,
+            weather: Weather::Overcast,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_global(key: &str) -> Option<String> {
+    let g = js_sys::global();
+    js_sys::Reflect::get(&g, &wasm_bindgen::JsValue::from_str(key))
+        .ok()?
+        .as_string()
+}
+
+/// Scale a color's RGB by `f` (clamped), used for wet/snow terrain shifts.
+fn shade(color: Color, f: f32) -> Color {
+    let c = color.to_srgba();
+    Color::srgb(
+        (c.red * f).clamp(0.0, 1.0),
+        (c.green * f).clamp(0.0, 1.0),
+        (c.blue * f).clamp(0.0, 1.0),
+    )
+}
 
 // ---- Battlefield geometry -------------------------------------------------
 
@@ -89,7 +282,9 @@ impl Rng {
 }
 
 const ISO_DIR: Vec3 = Vec3::new(1.0, 1.15, 1.0);
-const CAM_DIST: f32 = 90.0;
+// Orthographic, so this only affects clipping and *fog distance* — kept modest
+// so weather fog forms a gradient across the field rather than a solid wall.
+const CAM_DIST: f32 = 62.0;
 
 // ---- Shared art (meshes + materials built once) ---------------------------
 
@@ -152,6 +347,7 @@ fn main() {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
+        .insert_resource(read_setup())
         .insert_resource(ClearColor(Color::srgb(0.63, 0.67, 0.72)))
         .insert_resource(CameraFocus(Vec3::ZERO))
         .insert_resource(Rng(0x1234_5678))
@@ -167,9 +363,18 @@ fn setup_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut rng: ResMut<Rng>,
+    setup: Res<Setup>,
 ) {
-    // Camera (iso ortho) + camera-attached ambient light.
-    commands.spawn((
+    let weather = setup.weather;
+    let (ground_col, nomans_col, crater_col, crater_n) = setup.location.palette();
+    let wet = weather.wet();
+
+    // Sky color from the weather.
+    commands.insert_resource(ClearColor(weather.sky()));
+
+    // Camera (iso ortho) + camera-attached ambient light + optional fog.
+    let (amb_col, amb_bright) = weather.ambient();
+    let mut cam = commands.spawn((
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
@@ -179,39 +384,50 @@ fn setup_world(
         }),
         Transform::from_translation(ISO_DIR.normalize() * CAM_DIST).looking_at(Vec3::ZERO, Vec3::Y),
         AmbientLight {
-            color: Color::srgb(0.85, 0.86, 0.90),
-            brightness: 300.0,
+            color: amb_col,
+            brightness: amb_bright,
             ..default()
         },
     ));
+    if let Some((fog_col, start, end)) = weather.fog() {
+        cam.insert(DistanceFog {
+            color: fog_col,
+            directional_light_color: Color::NONE,
+            directional_light_exponent: 8.0,
+            falloff: FogFalloff::Linear { start, end },
+        });
+    }
+
+    // Sun.
+    let (illum, shadows) = weather.sun();
     commands.spawn((
         DirectionalLight {
-            illuminance: 9000.0,
-            shadow_maps_enabled: true,
+            illuminance: illum,
+            shadow_maps_enabled: shadows,
             ..default()
         },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Ground + no-man's-land.
+    // Ground + no-man's-land, tinted by location and weather.
     let ground = meshes.add(Cuboid::new(FIELD_X * 2.0 + 8.0, 1.0, FIELD_Z * 2.0 + 8.0));
-    let ground_mat = materials.add(matte(Color::srgb(0.28, 0.26, 0.19)));
+    let ground_mat = materials.add(matte(shade(ground_col, wet)));
     commands.spawn((
         Mesh3d(ground),
         MeshMaterial3d(ground_mat),
         Transform::from_xyz(0.0, -0.5, 0.0),
     ));
     let strip = meshes.add(Cuboid::new(FIELD_X * 2.0, 0.06, TRENCH_Z * 2.0 - 3.0));
-    let strip_mat = materials.add(matte(Color::srgb(0.17, 0.15, 0.12)));
+    let strip_mat = materials.add(matte(shade(nomans_col, wet)));
     commands.spawn((
         Mesh3d(strip),
         MeshMaterial3d(strip_mat),
         Transform::from_xyz(0.0, 0.03, 0.0),
     ));
 
-    // Scatter shell craters across no-man's-land.
-    let crater_mat = materials.add(matte(Color::srgb(0.20, 0.18, 0.14)));
-    for _ in 0..70 {
+    // Scatter shell craters across no-man's-land (density varies by theatre).
+    let crater_mat = materials.add(matte(shade(crater_col, wet)));
+    for _ in 0..crater_n {
         let s = rng.range(0.6, 2.4);
         let x = rng.range(-FIELD_X, FIELD_X);
         let z = rng.range(-TRENCH_Z + 1.0, TRENCH_Z - 1.0);
@@ -599,7 +815,12 @@ fn add_field_gun(e: &mut EntityCommands, art: &Meshes, shared: &SharedMats) {
 
 // ---- UI overlay -----------------------------------------------------------
 
-fn setup_ui(mut commands: Commands) {
+fn setup_ui(mut commands: Commands, setup: Res<Setup>) {
+    let subtitle = format!(
+        "{}  -  {}   |   British (khaki, south)  vs  Central Powers (grey, north)",
+        setup.location.name(),
+        setup.weather.name(),
+    );
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -619,7 +840,7 @@ fn setup_ui(mut commands: Commands) {
                 TextColor(Color::srgb(0.12, 0.12, 0.12)),
             ));
             p.spawn((
-                Text::new("Deployment: British (khaki, south)  vs  Central Powers (grey, north)"),
+                Text::new(subtitle),
                 TextFont {
                     font_size: FontSize::Px(15.0),
                     ..default()

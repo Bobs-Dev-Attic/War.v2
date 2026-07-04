@@ -3,72 +3,224 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>War.v2 — Bevy on the web</title>
+    <title>War.v2 — WWI Battle Setup</title>
     <style>
-      html,
-      body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
+      :root {
+        --ink: #2b2a24;
+        --parchment: #e8e0cc;
+        --parchment-2: #ddd3b8;
+        --khaki: #6b6540;
+        --khaki-dark: #4a4530;
+        --accent: #8a5a2b;
+        --line: #c3b895;
+      }
+      * { box-sizing: border-box; }
+      /* `hidden` must win over the explicit display rules below. */
+      [hidden] { display: none !important; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
         background: #0f1729;
-        overflow: hidden;
         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: var(--ink);
+        overflow: hidden;
       }
-      #bevy-canvas {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        touch-action: none;
-        outline: none;
+      /* ---- Setup page ---- */
+      #setup {
+        position: fixed; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        padding: 20px;
+        background:
+          radial-gradient(1200px 600px at 50% -10%, #3a4256, #0f1729 60%);
+        overflow: auto;
       }
+      .panel {
+        width: min(920px, 100%);
+        background: var(--parchment);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+        overflow: hidden;
+      }
+      header.hd {
+        padding: 18px 24px;
+        background: linear-gradient(var(--khaki), var(--khaki-dark));
+        color: #f3eeda;
+        border-bottom: 2px solid var(--khaki-dark);
+      }
+      header.hd h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.02em; }
+      header.hd p { margin: 4px 0 0; font-size: 0.9rem; opacity: 0.85; }
+      .tabs { display: flex; gap: 2px; background: var(--parchment-2); padding: 0 12px; border-bottom: 1px solid var(--line); }
+      .tab {
+        appearance: none; border: 0; background: transparent;
+        padding: 12px 18px; font-size: 0.95rem; font-weight: 600; color: var(--khaki-dark);
+        cursor: pointer; border-bottom: 3px solid transparent; opacity: 0.7;
+      }
+      .tab[aria-selected="true"] { opacity: 1; border-bottom-color: var(--accent); }
+      .body { padding: 22px 24px; min-height: 320px; }
+      .tabpanel[hidden] { display: none; }
+      h2.section { margin: 4px 0 12px; font-size: 1.05rem; color: var(--khaki-dark); }
+      .grid {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+        gap: 12px; margin-bottom: 22px;
+      }
+      .card, .chip {
+        border: 1px solid var(--line); border-radius: 9px; background: #f3eeda;
+        cursor: pointer; transition: transform 0.06s ease, border-color 0.1s;
+      }
+      .card { padding: 12px 14px; }
+      .card h3 { margin: 0 0 4px; font-size: 0.98rem; }
+      .card p { margin: 0; font-size: 0.8rem; color: #6a6449; line-height: 1.3; }
+      .card[aria-pressed="true"], .chip[aria-pressed="true"] {
+        border-color: var(--accent); outline: 2px solid var(--accent);
+        background: #fbf6e6;
+      }
+      .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+      .chip { padding: 10px 16px; font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+      .chip .ico { font-size: 1.15rem; }
+      .deploy-note {
+        border: 1px dashed var(--line); border-radius: 9px; padding: 26px;
+        text-align: center; color: #6a6449; background: #efe8d3;
+      }
+      footer.ft {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 16px 24px; border-top: 1px solid var(--line); background: var(--parchment-2);
+        gap: 12px; flex-wrap: wrap;
+      }
+      .summary { font-size: 0.9rem; color: var(--khaki-dark); }
+      .summary b { color: var(--ink); }
+      .start {
+        appearance: none; border: 0; border-radius: 9px; cursor: pointer;
+        padding: 12px 22px; font-size: 1rem; font-weight: 700; color: #f7f2e2;
+        background: linear-gradient(var(--accent), #6f461f);
+        box-shadow: 0 4px 0 #5a3818;
+      }
+      .start:active { transform: translateY(2px); box-shadow: 0 2px 0 #5a3818; }
+      /* ---- Battle canvas ---- */
+      #bevy-canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
       #loading {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #9fb4d4;
-        font-size: 1.1rem;
-        letter-spacing: 0.02em;
-        pointer-events: none;
-        transition: opacity 0.4s ease;
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: #9fb4d4; font-size: 1.1rem; letter-spacing: 0.02em; pointer-events: none;
+        transition: opacity 0.4s ease; background: #0f1729;
       }
     </style>
   </head>
   <body>
-    <div id="loading">Loading War.v2 (Bevy + WebAssembly)…</div>
-    <canvas id="bevy-canvas"></canvas>
+    <div id="setup">
+      <div class="panel">
+        <header class="hd">
+          <h1>War.v2 — WWI Battle Setup</h1>
+          <p>Choose the ground and the weather, then take the field.</p>
+        </header>
+
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true" data-tab="terrain">1 · Location &amp; Weather</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="deploy">2 · Deploy</button>
+        </div>
+
+        <div class="body">
+          <section class="tabpanel" data-panel="terrain">
+            <h2 class="section">Location</h2>
+            <div class="grid" id="locations"></div>
+            <h2 class="section">Weather</h2>
+            <div class="chips" id="weathers"></div>
+          </section>
+
+          <section class="tabpanel" data-panel="deploy" hidden>
+            <h2 class="section">Deploy your units</h2>
+            <div class="deploy-note">
+              <p style="margin:0 0 6px; font-weight:600;">Top-down mini-map placement is coming next (v0.6.0).</p>
+              <p style="margin:0;">You'll place infantry, snipers, machine guns, artillery, runners and scouts
+              for both sides on a mini-map here. For now, both armies deploy into their trenches automatically
+              when the battle begins.</p>
+            </div>
+          </section>
+        </div>
+
+        <footer class="ft">
+          <div class="summary" id="summary"></div>
+          <button class="start" id="start">Start Battle ▶</button>
+        </footer>
+      </div>
+    </div>
+
+    <canvas id="bevy-canvas" hidden></canvas>
+    <div id="loading" hidden>Deploying to the front (loading WebAssembly)…</div>
 
     <script type="module">
-      import init from "./war_v2.js";
+      const LOCATIONS = [
+        { id: "somme",     name: "The Somme (1916)",   blurb: "Chalky mud and shell-holes on the Western Front." },
+        { id: "ypres",     name: "Ypres / Flanders",   blurb: "Waterlogged clay and flooded craters in Belgium." },
+        { id: "gallipoli", name: "Gallipoli (1915)",   blurb: "Arid coastal scrub and ridges — the Ottoman front." },
+        { id: "sinai",     name: "Sinai & Palestine",  blurb: "Open desert sand and dunes." },
+        { id: "verdun",    name: "Verdun",             blurb: "Shell-torn forested hills." },
+      ];
+      const WEATHERS = [
+        { id: "clear",    name: "Clear",    ico: "☀" },
+        { id: "overcast", name: "Overcast", ico: "☁" },
+        { id: "rain",     name: "Rain",     ico: "🌧" },
+        { id: "fog",      name: "Fog",      ico: "🌫" },
+        { id: "snow",     name: "Snow",     ico: "❄" },
+      ];
 
-      // Safety net: never leave the loader up for more than a few seconds.
-      const dropLoader = () => {
-        const el = document.getElementById("loading");
-        if (el) {
-          el.style.opacity = "0";
-          setTimeout(() => el.remove(), 500);
+      let sel = { location: "somme", weather: "overcast" };
+
+      const locWrap = document.getElementById("locations");
+      LOCATIONS.forEach((l) => {
+        const b = document.createElement("button");
+        b.className = "card"; b.type = "button"; b.dataset.id = l.id;
+        b.setAttribute("aria-pressed", String(l.id === sel.location));
+        b.innerHTML = `<h3>${l.name}</h3><p>${l.blurb}</p>`;
+        b.onclick = () => { sel.location = l.id; refresh(); };
+        locWrap.appendChild(b);
+      });
+
+      const wxWrap = document.getElementById("weathers");
+      WEATHERS.forEach((w) => {
+        const b = document.createElement("button");
+        b.className = "chip"; b.type = "button"; b.dataset.id = w.id;
+        b.setAttribute("aria-pressed", String(w.id === sel.weather));
+        b.innerHTML = `<span class="ico">${w.ico}</span>${w.name}`;
+        b.onclick = () => { sel.weather = w.id; refresh(); };
+        wxWrap.appendChild(b);
+      });
+
+      function refresh() {
+        for (const el of locWrap.children) el.setAttribute("aria-pressed", String(el.dataset.id === sel.location));
+        for (const el of wxWrap.children) el.setAttribute("aria-pressed", String(el.dataset.id === sel.weather));
+        const l = LOCATIONS.find((x) => x.id === sel.location).name;
+        const w = WEATHERS.find((x) => x.id === sel.weather).name;
+        document.getElementById("summary").innerHTML = `Battlefield: <b>${l}</b> · Weather: <b>${w}</b>`;
+      }
+      refresh();
+
+      // Tabs.
+      for (const tab of document.querySelectorAll(".tab")) {
+        tab.onclick = () => {
+          for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t === tab));
+          for (const p of document.querySelectorAll(".tabpanel")) p.hidden = p.dataset.panel !== tab.dataset.tab;
+        };
+      }
+
+      // Start: hand config to wasm, then boot the battle.
+      document.getElementById("start").onclick = async () => {
+        window.__WAR_LOCATION = sel.location;
+        window.__WAR_WEATHER = sel.weather;
+        document.getElementById("setup").remove();
+        const canvas = document.getElementById("bevy-canvas");
+        const loading = document.getElementById("loading");
+        canvas.hidden = false; loading.hidden = false;
+        const dropLoader = () => { loading.style.opacity = "0"; setTimeout(() => loading.remove(), 500); };
+        setTimeout(dropLoader, 8000);
+        try {
+          const { default: init } = await import("./war_v2.js");
+          await init();
+          dropLoader();
+        } catch (err) {
+          loading.textContent = "Failed to start the battle — see the console.";
+          loading.style.color = "#ff8080";
+          console.error(err);
         }
       };
-      setTimeout(dropLoader, 6000);
-
-      init()
-        .then(() => {
-          // Bevy has taken over the canvas; fade the loader out.
-          const el = document.getElementById("loading");
-          if (el) {
-            el.style.opacity = "0";
-            setTimeout(() => el.remove(), 500);
-          }
-        })
-        .catch((err) => {
-          const el = document.getElementById("loading");
-          if (el) {
-            el.textContent = "Failed to start War.v2 — see the console for details.";
-            el.style.color = "#ff8080";
-          }
-          console.error(err);
-        });
     </script>
   </body>
 </html>
