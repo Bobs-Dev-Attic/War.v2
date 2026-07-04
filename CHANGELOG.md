@@ -3,6 +3,20 @@
 Version shown in-game (bottom of the board) is wired to the crate version in
 `Cargo.toml`, so what you see deployed always matches an entry below.
 
+## v0.4.0
+
+- **Trench warfare**: each side now has a sandbagged trench line — duckboard
+  channel, crenellated front parapet and a rear parados — dug in on its side of
+  no-man's-land.
+- **Unit-type roster**: distinct low-poly models for infantry, snipers (kneeling,
+  long rifle), machine gunners (crewed tripod gun), artillery (wheeled field gun
+  with shield and crew), runners (satchel, no rifle) and scouts (cap,
+  binoculars).
+- Each side deploys a mixed garrison: infantry holding the fire trench, MG nests
+  along it, snipers on the flanks, scouts pushed forward, runners behind, and an
+  artillery battery in the rear.
+- Foundation for interactive setup (v0.5.0) and real-time commands (v0.6.0).
+
 ## v0.3.1
 
 - **Soldiers, not tanks**: the units you'll command are low-poly infantry —

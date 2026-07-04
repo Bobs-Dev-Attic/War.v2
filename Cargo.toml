@@ -1,6 +1,6 @@
 [package]
 name = "war_v2"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "War.v2 — a small Bevy demo compiled to WebAssembly, hosted on Vercel."
 
